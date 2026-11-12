@@ -1,0 +1,77 @@
+# linux.yml
+#
+# Tests the Linux host and builds linux/dist/oot-sw2se.pyz with
+# linux/build.sh, then publishes it as OOT-SW2SE-<version>-linux.pyz: as a
+# workflow artifact on every run (download it from the run's page in the
+# Actions tab) and as an asset of each published GitHub release, next to the
+# Windows and macOS zips. The .pyz contains no compiled code, so one file
+# runs on every architecture.
+
+name: Linux build
+
+on:
+  push:
+    branches: [main]
+    # Only the files that go into the app or produce it.
+    paths:
+      - "linux/**"
+      - "editor.html"
+      - "editor.ico"
+      - "Program.cs"
+      - "LICENSE"
+      - ".github/workflows/linux.yml"
+  pull_request:
+    paths:
+      - "linux/**"
+      - "editor.html"
+      - "editor.ico"
+      - "Program.cs"
+      - "LICENSE"
+      - ".github/workflows/linux.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # Write access is used only by the release step to attach the file.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Test the host
+        run: |
+          python3 --version
+          python3 -m unittest discover -s linux/tests -v
+
+      - name: Build the app
+        id: build
+        run: |
+          linux/build.sh
+          version="$(python3 -I linux/dist/oot-sw2se.pyz --version | awk '{print $NF}')"
+          file="linux/dist/OOT-SW2SE-$version-linux.pyz"
+          mv linux/dist/oot-sw2se.pyz "$file"
+          echo "path=$file" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the app as a workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.build.outputs.path }}
+          # Upload the file as it is instead of wrapping it in a zip.
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Attach the app to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          FILE: ${{ steps.build.outputs.path }}
+        # --clobber replaces the asset when the run is re-run.
+        run: gh release upload "$TAG" "$FILE" --clobber --repo "$GITHUB_REPOSITORY"

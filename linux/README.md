@@ -1,0 +1,143 @@
+# OOT SW2SE for Linux
+
+The OOT SW2SE save editor for Linux. It shows the same
+[`editor.html`](../editor.html) as the Windows and macOS versions, unchanged,
+so the editor itself behaves identically. Only the host differs
+([`oot_sw2se.py`](oot_sw2se.py)): instead of embedding a web view, it opens
+the editor in your default web browser and shows native folder and save
+dialogs.
+
+## Requirements
+
+- Python 3.8 or later. Most desktop distributions include it.
+- `kdialog` (KDE) or `zenity` (GNOME and most other desktops) for the file
+  dialogs. Most desktops include one of them. The editor uses `kdialog` on KDE
+  and LXQt, and `zenity` everywhere else, falling back to whichever is
+  installed. Set `OOT_SW2SE_DIALOG=kdialog` or `OOT_SW2SE_DIALOG=zenity` to
+  choose one.
+- A current web browser (Firefox, Chromium, Chrome, …).
+
+The host uses only the Python standard library, so you don't need to install
+anything with pip.
+
+## Build
+
+From the repository folder:
+
+```sh
+linux/build.sh
+```
+
+This writes `linux/dist/oot-sw2se.pyz`, a single executable file (a Python
+[zipapp](https://docs.python.org/3/library/zipapp.html)) that contains the
+editor, its icon and the license. The version shown in the editor is read from
+`Program.cs`.
+
+To build an AppImage as well, install
+[appimagetool](https://github.com/AppImage/appimagetool) and run:
+
+```sh
+linux/build.sh --appimage    # or: APPIMAGETOOL=/path/to/appimagetool linux/build.sh --appimage
+```
+
+This also writes `linux/dist/OOT_SW2SE-<version>-<arch>.AppImage`. It runs the
+same `.pyz` with the system's `python3`, so the requirements above still
+apply.
+
+You can also run the editor straight from a checkout, without building it:
+
+```sh
+python3 linux/oot_sw2se.py
+```
+
+## Use
+
+1. Start `oot-sw2se.pyz` by double-clicking it or running
+   `linux/dist/oot-sw2se.pyz` in a terminal. The editor opens in a new browser
+   tab. A downloaded copy first needs `chmod +x oot-sw2se.pyz`, or start it
+   with `python3 oot-sw2se.pyz`.
+2. Click **Open Backup** and pick one of:
+   - a backup folder (with `files/slot_00` … or `slot_00` … inside),
+   - the `files` folder of a backup,
+   - a single `slot_0X` folder,
+   - any folder that holds `progress.sav` and `caption.sav`.
+3. Edit, then choose **Save Patch ZIP** or **Export to Folder**. Folder export
+   creates a new `Ocarina-of-Time-…-Patch-<UTC timestamp>_<uuid>` folder in your
+   selected location; ZIP exports use the same name with `.zip` appended.
+   Both contain a UTC timestamp folder such as `20261109_094216/` instead of
+   `files/`. Copy that folder's contents into the `files/` directory of a **copy**
+   of your full backup; copy `manifest.json` to the backup root when included.
+   For a standalone save, copy the files inside the timestamp folder into the
+   save folder. The patch contains only edited files, not a complete backup.
+
+Closing the browser tab ends the editor: the helper program exits about ten
+seconds later. Reloading the tab keeps it running, but discards unsaved edits.
+
+Close the game or emulator first: a save file that changes while it is being
+read is refused.
+
+### Add it to the application menu
+
+```sh
+linux/dist/oot-sw2se.pyz --install
+```
+
+This copies the app to `~/.local/bin/oot-sw2se` and adds a menu entry and
+icon for your user. `oot-sw2se --uninstall` removes them again. For the
+AppImage, use your desktop's AppImage integration (for example Gear Lever or
+AppImageLauncher) instead.
+
+### Options
+
+| Option         | Effect                                                         |
+| -------------- | -------------------------------------------------------------- |
+| `--no-browser` | Print the editor address instead of opening the default browser |
+| `--install`    | Add the app to `~/.local/bin` and the application menu          |
+| `--uninstall`  | Undo `--install`                                               |
+| `--verbose`    | Log every HTTP request                                         |
+| `--version`    | Print the version                                              |
+
+To use a browser other than the default one, start with `--no-browser` and
+open the printed address there, or set the `BROWSER` environment variable.
+
+## How it works
+
+The Windows and macOS hosts expose the WebView2 bridge
+(`window.chrome.webview`) to the page and answer three requests: open a
+backup, save a patch ZIP, write a patch folder. The Linux host does the same
+over HTTP:
+
+- It serves the editor from a server that listens only on `127.0.0.1`, on a
+  random port.
+- Before sending the page, it adds a small script that provides
+  `window.chrome.webview` on top of `fetch()`, and it adds
+  `connect-src 'self'` to the page's Content-Security-Policy so that script can
+  reach the server. All other network access stays blocked.
+- The browser opens a one-time launch address that sets a session cookie
+  (`HttpOnly`, `SameSite=Strict`). Every request must carry this cookie, the
+  page's own origin and a custom header. The server also checks the `Host`
+  header. Other websites and other users on the same machine can't use the
+  editor's file access.
+- Backups are read with the same folder rules and size limits as the macOS
+  host. Patches are validated and written like on the other platforms. ZIP
+  files are written atomically, and patch folders never replace existing
+  files or folders.
+
+## Tests
+
+```sh
+python3 -m unittest discover -s linux/tests -v
+```
+
+These tests cover backup reading, patch validation and writing (the same
+cases `tests/host_exports.py` runs against the Windows and macOS hosts), page
+preparation, the server's access checks and the editor's lifetime. They don't
+open real dialogs or a browser, and they don't replace in-game testing with a
+real save.
+
+## License
+
+MIT, like the rest of the project: see [`LICENSE`](../LICENSE). The build
+places a copy inside the app (`LICENSE.txt`) and next to it in `dist`; keep
+it with the app when you share it. Game imagery shown by the editor keeps its
+own terms.

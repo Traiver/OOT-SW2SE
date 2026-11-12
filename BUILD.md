@@ -26,9 +26,23 @@ GitHub Actions also runs this script ([`.github/workflows/macos.yml`](.github/wo
 
 `macos/OOTSW2SE.swift` contains the native window and file dialogs. See [`macos/README.md`](macos/README.md) for usage notes and for running the app on another Mac.
 
+## Linux
+
+Use Python 3.8 or later; no other build tools are needed. From a terminal in this folder, run:
+
+```sh
+linux/build.sh
+```
+
+The script places `linux/dist/oot-sw2se.pyz`, a single executable file that bundles `linux/oot_sw2se.py` with the same `editor.html` unchanged, the icon and the project license, in `linux/dist`. It reads the version from `Program.cs`. With `--appimage` and [appimagetool](https://github.com/AppImage/appimagetool) installed, it also builds an AppImage. At runtime, the app opens the editor in the default web browser and uses `kdialog` or `zenity` for file dialogs.
+
+GitHub Actions also runs this script ([`.github/workflows/linux.yml`](.github/workflows/linux.yml)) and attaches `OOT-SW2SE-<version>-linux.pyz` to releases. See [`linux/README.md`](linux/README.md) for usage notes, desktop integration and how the browser host works.
+
 ## Checks
 
 Run `node --test tests/editor.test.cjs` for synthetic save regression tests.
+Run `python3 -m unittest discover -s linux/tests -v` for the Linux host's backup
+reading, export, page and server checks.
 On a Mac with Swift and Mono installed, run `python3 tests/host_exports.py` to
 compile and exercise the actual Swift and C# folder export helpers, including
 path validation and byte-for-byte output checks. These checks do not replace
