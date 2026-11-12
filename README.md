@@ -12,6 +12,84 @@ Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream 
 - Remove supported owned single items, optionally clearing their mapped acquisition flags. Acquisition history is kept by default; story and quest progress are not reset. Unequip weapons and shields in both eras first. Default clothes, quantities, and capacity upgrades use their own controls rather than inventory removal.
 - Export replacement files as a ZIP or to a new patch folder on Windows, macOS and Linux. Export names include a UTC timestamp followed by a UUID; replacement files sit inside a folder named with that same UTC timestamp (`yyyyMMdd_HHmmss`). Exports contain only replacement files, not a complete backup.
 - Toggle progress flags and change the spoken dialogue language when `option.sav` is available.
+- Open the most recently saved slot automatically, list every slot with its in-game save time, and give exported ZIP entries the slot's save time. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
+
+## Save time: newest slot and ZIP timestamps
+
+A backup holds up to six slots (`slot_00` … `slot_05`): autosaves and manual saves. When you continue in the game, it loads the most recently saved slot, which is often not `slot_00`. Before this change, the editor always opened `slot_00` first. Edits to that slot then had no visible effect in the game, because the game kept loading a newer slot. The exported ZIP also dated every file 1980-01-01 00:00, so you could not tell from the files which save a patch came from.
+
+The editor now uses the save time that the game writes into each slot's `caption.sav`, to the second.
+
+### What the user sees
+
+- When a backup with several slots is opened, the editor opens the newest slot instead of `slot_00`.
+- Every entry in the slot list shows its save time and save type, and the newest one is marked:
+
+  ```text
+  slot_00 · 12.11.2026 · 23:21:25 · autosave
+  slot_01 · 12.11.2026 · 23:07:15 · autosave
+  slot_02 · 12.11.2026 · 23:21:55 · autosave
+  slot_03 · 12.11.2026 · 23:16:50 · autosave
+  slot_04 · 12.11.2026 · 23:13:17 · autosave
+  slot_05 · 13.11.2026 · 00:12:41 · manual save · newest   ← opened automatically
+  ```
+
+- The Overview shows the same time under **Saved**, now with seconds.
+- Entries in an exported ZIP carry the slot's save time instead of 1980-01-01 00:00.
+- You can still pick any slot from the list. Nothing is written to the backup.
+
+### Where the time comes from
+
+`caption.sav` stores the save time as separate integer fields. They hold the local date and time of the console (or emulator) at the moment of saving:
+
+| Field hash   | Meaning                       | Note                         |
+| ------------ | ----------------------------- | ---------------------------- |
+| `0x9811A3F7` | Year                          |                              |
+| `0xDFD840D3` | Month                         |                              |
+| `0xBD46F485` | Day                           |                              |
+| `0x23F3D75E` | Hour                          |                              |
+| `0x27853BF7` | Minute                        |                              |
+| `0x5EE50BED` | Second                        | Newly identified, see below  |
+| `0x25F03CAA` | 1 = autosave, 0 = manual save |                              |
+
+The editor already displayed all fields except the seconds. The seconds field and the day and month order were identified by comparing 18 slots saved by three Switch emulators with the file modification time of their `caption.sav`. In all 16 slots whose file time was still original, the stored date and time matched it within a few seconds: the file was written between 0.4 seconds before and 3.2 seconds after the stored time. The 0.4 seconds before are an emulator clock that runs slightly ahead; the longest gaps are manual saves, which also write a screenshot. A save time counts as valid only if all fields are in range (year 1980–2107, month 1–12, day 1–31, hour 0–23, minute and second 0–59). A `caption.sav` without the seconds field is read as second 0.
+
+Because the complete time comes from the save itself, file times are not used at all. The result does not depend on the time zone, on how the backup was copied or extracted, or on the platform. The editor behaves the same on Windows, macOS and Linux, and would also work as a plain web page.
+
+### Which slot is newest
+
+1. Slots are compared by their in-game save time: date, hour, minute and second.
+2. If two slots share the same second, the lower slot number wins.
+3. Slots without a valid save time, or with an unreadable `caption.sav`, rank last. If no slot has a valid time, the editor opens the first slot, as before.
+
+### ZIP timestamps
+
+Each entry in an exported ZIP (`progress.sav`, `caption.sav`, and `option.sav` or `manifest.json` when included) gets the save time of the exported slot. If the slot has no valid save time, the editor uses the current local time. Before this change, every entry was dated 1980-01-01 00:00.
+
+The ZIP stores this in the standard MS-DOS date and time fields. Like the save time, these hold a plain local date and time without a time zone, so an extracted file shows the same wall-clock time as the game, on any computer and in any time zone. MS-DOS time counts seconds in steps of two, so odd seconds are rounded down: 00:12:41 becomes 00:12:40. The editor never reads file times back, so this has no effect on which slot is newest.
+
+Storing odd seconds exactly would need the ZIP "extended timestamp" field. That field holds UTC, so the editor would have to assume a time zone for the save time, and not every unpacking tool reads it. This was left out on purpose.
+
+Folder export is unchanged. The native host writes those files with the export time, like any file copy.
+
+### Limitations
+
+- Tested with the unit tests and, in a browser, with copies of real emulator saves. Not yet verified with saves from a console or in the game on a console.
+- The seconds field was identified from emulator saves only. Saves from a console are expected to use the same format, since the game writes it.
+
+### Code
+
+All logic is in `editor.html` and shared by every platform. No host changes are needed.
+
+| Function                 | Purpose                                                                  |
+| ------------------------ | ------------------------------------------------------------------------ |
+| `saveTime(c)`            | Reads and validates the save time from a parsed `caption.sav`            |
+| `newestSlot(slots)`      | Applies the rules above                                                  |
+| `formatSaveTime(t)`      | Text for the slot list and Overview                                      |
+| `dosDateTime(t, now)`    | Converts the save time to ZIP (MS-DOS) time and date                     |
+| `openBackupFiles(files)` | Reads every slot's save time, labels the list and opens the newest slot  |
+
+To go back to the previous behavior, open `backup.slots[0]` in `openBackupFiles` and call `zip(entries)` without a time. `tests/editor.test.cjs` covers field order, seconds, validation, tie handling and ZIP timestamps.
 
 ## Changes in this fork
 
@@ -32,7 +110,8 @@ Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream 
 2026-11-12 · 23:31 UTC
 
 - Added a Linux version in `linux/`: a Python host (standard library only) that opens the unchanged editor in the default web browser and uses `kdialog` or `zenity` for file dialogs. `linux/build.sh` builds a single executable `.pyz` and optionally an AppImage. See [`linux/README.md`](linux/README.md).
-- Added regression tests for the Linux host (`linux/tests/test_host.py`).
+- The editor now opens the most recently saved slot, shows each slot's save time (to the second, from the newly identified seconds field in `caption.sav`) in the slot list, and dates ZIP entries with the slot's save time instead of 1980-01-01. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
+- Added regression tests for both features (`tests/editor.test.cjs`, `linux/tests/test_host.py`).
 
 To apply a patch to a full backup, copy the contents of the timestamp folder into the backup's `files/` directory and copy `manifest.json` to the backup root when included. For a standalone save, copy the files inside the timestamp folder into the save folder. Work on a copy of the backup.
 

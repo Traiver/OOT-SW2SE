@@ -467,6 +467,32 @@ function readSlot(progress, caption) {
   return { p, c, w, rupees, capacities, counts, bottles, vitals, legacyMagic };
 }
 
+// The in-game save time from caption.sav: the local date and time of the
+// console (or emulator) when the slot was saved, to the second.
+function saveTime(c) {
+  const t = {
+    year: c.int(0x9811A3F7), month: c.int(0xDFD840D3), day: c.int(0xBD46F485),
+    hour: c.int(0x23F3D75E), minute: c.int(0x27853BF7),
+    second: c.fields.has(0x5EE50BED) ? c.int(0x5EE50BED) : 0, auto: c.int(0x25F03CAA) !== 0,
+  };
+  t.valid = t.year >= 1980 && t.year <= 2107 && t.month >= 1 && t.month <= 12 && t.day >= 1 && t.day <= 31 &&
+    t.hour >= 0 && t.hour <= 23 && t.minute >= 0 && t.minute <= 59 && t.second >= 0 && t.second <= 59;
+  return t;
+}
+
+function formatSaveTime(t) {
+  const pad = n => String(n).padStart(2, '0');
+  return pad(t.day) + '.' + pad(t.month) + '.' + t.year + ' · ' + pad(t.hour) + ':' + pad(t.minute) + ':' +
+    pad(t.second) + ' · ' + (t.auto ? "autosave" : "manual save");
+}
+
+// Picks the most recently saved slot by in-game save time. Slots without a
+// valid save time come last; on a tie (same second) the lower slot number wins.
+function newestSlot(slots) {
+  const key = t => t?.valid ? Date.UTC(t.year, t.month - 1, t.day, t.hour, t.minute, t.second) : -Infinity;
+  return slots.reduce((best, slot) => key(slot.time) > key(best.time) ? slot : best, slots[0]);
+}
+
 function readOptions(bytes) {
   const save = readSave(bytes, 0x2A0);
   const language = save.u32(save.at(voiceHash));
@@ -727,7 +753,21 @@ function crc32(bytes) {
   return (n ^ 0xFFFFFFFF) >>> 0;
 }
 
-function zip(entries) {
+// MS-DOS time and date for ZIP entries: the slot's in-game save time, or the
+// current local time when the save has none. Like the save time, MS-DOS time
+// is a plain local date and time without a time zone.
+function dosDateTime(time, now = new Date()) {
+  const t = time?.valid ? time : {
+    year: now.getFullYear(), month: now.getMonth() + 1, day: now.getDate(),
+    hour: now.getHours(), minute: now.getMinutes(),
+  };
+  // MS-DOS time counts seconds in steps of two.
+  const halfSeconds = Math.floor((time?.valid ? time.second : now.getSeconds()) / 2);
+  return [(t.hour << 11) | (t.minute << 5) | halfSeconds, ((t.year - 1980) << 9) | (t.month << 5) | t.day];
+}
+
+function zip(entries, time, now) {
+  const [dosTime, dosDate] = dosDateTime(time, now);
   const records = [];
   const directory = [];
   let offset = 0;
@@ -737,7 +777,8 @@ function zip(entries) {
     const local = new DataView(new ArrayBuffer(30));
     local.setUint32(0, 0x04034B50, true);
     local.setUint16(4, 20, true);
-    local.setUint16(12, 0x21, true);
+    local.setUint16(10, dosTime, true);
+    local.setUint16(12, dosDate, true);
     local.setUint32(14, crc, true);
     local.setUint32(18, bytes.length, true);
     local.setUint32(22, bytes.length, true);
@@ -746,7 +787,8 @@ function zip(entries) {
     central.setUint32(0, 0x02014B50, true);
     central.setUint16(4, 20, true);
     central.setUint16(6, 20, true);
-    central.setUint16(14, 0x21, true);
+    central.setUint16(12, dosTime, true);
+    central.setUint16(14, dosDate, true);
     central.setUint32(16, crc, true);
     central.setUint32(20, bytes.length, true);
     central.setUint32(24, bytes.length, true);
@@ -1164,12 +1206,9 @@ function initialize() {
   function render() {
     const p = state.p;
     const c = state.c;
-    const pad = n => String(n).padStart(2, '0');
-    const date = pad(c.int(0xBD46F485)) + '.' + pad(c.int(0xDFD840D3)) + '.' + c.int(0x9811A3F7);
-    const time = pad(c.int(0x23F3D75E)) + ':' + pad(c.int(0x27853BF7));
     const rows = [
       ['Slot', active.id],
-      ["Saved", date + ' · ' + time + ' · ' + (c.int(0x25F03CAA) ? "autosave" : "manual save")],
+      ["Saved", formatSaveTime(saveTime(c))],
       ["Area", p.string(0x1D6189DA, 64)],
       ["Progress ID", p.string(0x874C7ED4, 64) || '—'],
       ["Rupees", state.rupees + ' / ' + state.w.limit],
@@ -1259,18 +1298,32 @@ function initialize() {
       if (current === revision) showError(error);
     }
   }
-  function openBackupFiles(files) {
-    revision++;
+  // Reads the save time of every slot, labels the slot list with it and
+  // opens the most recently saved slot, which is the one the game continues.
+  async function openBackupFiles(files) {
+    const current = ++revision;
     get('main').hidden = true;
     get('slot-choice').hidden = true;
     try {
-      backup = findBackupFiles(files);
-      slotSelect.replaceChildren(...backup.slots.map(slot => new Option(slot.id, slot.id)));
-      slotSelect.value = backup.slots[0].id;
+      const found = findBackupFiles(files);
+      await Promise.all(found.slots.map(async slot => {
+        try {
+          slot.time = saveTime(readSave(new Uint8Array(await slot.caption.arrayBuffer()), 0x2A0));
+        } catch {
+          slot.time = null;
+        }
+      }));
+      if (current !== revision) return;
+      backup = found;
+      const newest = newestSlot(backup.slots);
+      slotSelect.replaceChildren(...backup.slots.map(slot => new Option(
+        slot.id + (slot.time ? ' · ' + formatSaveTime(slot.time) : '') +
+          (slot === newest && backup.slots.length > 1 ? ' · newest' : ''), slot.id)));
+      slotSelect.value = newest.id;
       get('slot-choice').hidden = backup.slots.length < 2;
-      return loadSlot(backup.slots[0]);
+      return loadSlot(newest);
     } catch (error) {
-      showError(error);
+      if (current === revision) showError(error);
     }
   }
   get('folder').addEventListener('click', async () => {
@@ -1345,7 +1398,7 @@ function initialize() {
       if (current !== revision) return;
       const saved = toFolder
         ? await desktop.saveFolder(name, entries)
-        : await desktop.savePatch(name + '.zip', zip(entries));
+        : await desktop.savePatch(name + '.zip', zip(entries, saveTime(state.c)));
       if (current === revision) result.textContent = saved ? message + ' ' + saved : "Save canceled.";
     } catch (error) {
       if (current === revision) result.textContent = error.message;
