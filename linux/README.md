@@ -61,7 +61,9 @@ python3 linux/oot_sw2se.py
    window, or in a new browser tab (see [Browser window](#browser-window)). A
    downloaded copy first needs `chmod +x oot-sw2se.pyz`, or start it with
    `python3 oot-sw2se.pyz`.
-2. Click **Open Backup** and pick one of:
+2. Click **Open Backup** and pick one of the following. The folder dialog
+   starts in the folder you opened last time, so reopening the same save
+   takes one click.
    - a backup folder (with `files/slot_00` … or `slot_00` … inside),
    - the `files` folder of a backup,
    - a single `slot_0X` folder,
@@ -89,7 +91,10 @@ linux/dist/oot-sw2se.pyz --install
 ```
 
 This copies the app to `~/.local/bin/oot-sw2se` and adds a menu entry and
-icon for your user. `oot-sw2se --uninstall` removes them again. For the
+icon for your user. It also adds hidden entries that give the editor's app
+window its own icon and name in the task bar instead of the browser's (see
+[Browser window](#browser-window)). `oot-sw2se --uninstall` removes all of
+them again. For the
 AppImage, use your desktop's AppImage integration (for example Gear Lever or
 AppImageLauncher) instead.
 
@@ -130,10 +135,42 @@ Keyring) appears. Closing the window ends the editor right away, and the
 temporary profile is deleted. It is also deleted when the editor is ended with
 Ctrl+C, by logging out or by closing its terminal.
 
+The window's size and maximized state are remembered for the next start
+(see [Settings](#settings)). Its position is remembered too, but only X11
+lets an application place its own window. On Wayland the compositor decides;
+on KDE Plasma the KWin script
+[Remember Window Positions](https://github.com/rxappdev/RememberWindowPositions)
+restores both size and position of the editor window.
+
+Chromium names an app window after the address it opens: on Wayland this is
+the app id, on X11 the window class. For the editor it is always
+`<browser>-127.0.0.1__oot-sw2se-Default`, for example
+`vivaldi-127.0.0.1__oot-sw2se-Default`. `--install` adds a hidden `.desktop`
+file with that name for each supported browser, so the desktop shows the
+editor's icon and name for the window, and pinning it to the task bar starts
+the editor. Without `--install`, the task bar shows the browser's icon.
+
 If no Chromium-based browser is found, or it fails to start, the editor opens
 in a new tab of your default browser instead. Browsers installed only as
 Flatpak or Snap are not detected; set `OOT_SW2SE_APP_BROWSER` to their
 launcher command if they accept Chromium's `--app` option, or use the tab.
+
+## Settings
+
+The editor remembers a few things between runs in
+`~/.config/OOT-SW2SE/settings.json` (`$XDG_CONFIG_HOME/OOT-SW2SE/`), or in
+`~/.local/share/OOT-SW2SE/settings.json` if the config folder can't be
+written:
+
+| Key                | Value                                                              |
+| ------------------ | ------------------------------------------------------------------ |
+| `lastBackupFolder` | Folder opened last; the **Open Backup** dialog starts there         |
+| `lastExportFolder` | Folder of the last ZIP or folder export; export dialogs start there |
+| `window`           | Size, position and maximized state of the app window               |
+
+Folders that no longer exist are ignored. The window size is only saved for
+the app window, not for a tab of a normal browser. Delete the file to reset
+everything; the editor works the same without it.
 
 ## How it works
 
@@ -166,8 +203,9 @@ python3 -m unittest discover -s linux/tests -v
 
 These tests cover backup reading, patch validation and writing (the same
 cases `tests/host_exports.py` runs against the Windows and macOS hosts), page
-preparation, the server's access checks, the editor's lifetime, and choosing,
-starting and cleaning up the browser window (with a stand-in browser). They
+preparation, the server's access checks, the editor's lifetime, the settings
+file, and choosing, starting, sizing and cleaning up the browser window (with a
+stand-in browser). They
 don't open real dialogs or a real browser, and they don't replace in-game
 testing with a real save.
 

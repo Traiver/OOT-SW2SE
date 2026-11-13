@@ -52,6 +52,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import uuid
 import webbrowser
 
@@ -528,17 +529,96 @@ class Dialogs:
         return chosen or None
 
 
+# MARK: - Settings
+
+SETTINGS_FOLDER = "OOT-SW2SE"
+
+
+def settings_folders() -> list[str]:
+    """Where settings.json is kept: $XDG_CONFIG_HOME/OOT-SW2SE (~/.config),
+    or $XDG_DATA_HOME/OOT-SW2SE (~/.local/share) if that can't be written."""
+    config = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return [os.path.join(config, SETTINGS_FOLDER), os.path.join(_data_home(), SETTINGS_FOLDER)]
+
+
+class Settings:
+    """Values remembered between runs: the last backup and export folders and
+    the app window's size, position and maximized state. Unreadable or
+    missing settings are ignored; failing to save them never stops the
+    editor."""
+
+    FILE = "settings.json"
+
+    def __init__(self, folders: list[str] | None = None) -> None:
+        self.folders = folders if folders is not None else settings_folders()
+        self._lock = threading.Lock()
+        self.values: dict = {}
+        for folder in self.folders:
+            try:
+                with open(os.path.join(folder, self.FILE), encoding="utf-8") as file:
+                    data = json.load(file)
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict):
+                self.values = data
+                break
+
+    def folder(self, key: str) -> str | None:
+        """A remembered folder, if it still exists."""
+        value = self.values.get(key)
+        return value if isinstance(value, str) and os.path.isdir(value) else None
+
+    def update(self, **changes: object) -> bool:
+        """Stores `changes` in the first settings folder that can be written."""
+        with self._lock:
+            self.values.update(changes)
+            data = (json.dumps(self.values, indent=2, ensure_ascii=False) + "\n").encode("utf-8", "surrogateescape")
+            for folder in self.folders:
+                try:
+                    os.makedirs(folder, exist_ok=True)
+                    write_file_atomically(os.path.join(folder, self.FILE), data)
+                    return True
+                except OSError:
+                    continue
+            return False
+
+
+def window_bounds(value: object) -> dict | None:
+    """Validates window bounds reported by the page (CSS pixels)."""
+    if not isinstance(value, dict):
+        return None
+    numbers = {}
+    for key, low, high in (("width", 400, 16384), ("height", 300, 16384), ("x", -32768, 32767), ("y", -32768, 32767)):
+        number = value.get(key)
+        if isinstance(number, bool) or not isinstance(number, (int, float)) or not low <= number <= high:
+            return None
+        numbers[key] = int(number)
+    numbers["maximized"] = value.get("maximized") is True
+    return numbers
+
+
+def remembered_window(previous: object, current: dict) -> dict:
+    """The bounds to save: a maximized window keeps the size and position it
+    had before, so un-maximizing it later restores them."""
+    if current["maximized"]:
+        restored = window_bounds(previous)
+        return {**(restored or current), "maximized": True}
+    return current
+
+
 # MARK: - Host actions
 
 class EditorHost:
     """Answers the page's requests, like HandleMessage in Program.cs."""
 
-    def __init__(self, dialogs: Dialogs) -> None:
+    def __init__(self, dialogs: Dialogs, settings: Settings | None = None) -> None:
         self.dialogs = dialogs
+        self.settings = settings
         # Guards against overlapping dialogs, like dialogOpen in Program.cs.
         self._dialog = threading.Lock()
-        self.last_folder: str | None = None
-        self.last_export_folder: str | None = None
+        # Dialogs start in the folders used last, also from earlier runs.
+        self.last_folder = settings.folder("lastBackupFolder") if settings else None
+        self.last_export_folder = settings.folder("lastExportFolder") if settings else None
 
     def handle(self, message: dict) -> dict:
         """Runs one request and returns {result, error} for the page."""
@@ -569,6 +649,7 @@ class EditorHost:
         if folder is None:
             return None
         self.last_folder = folder
+        self._remember(lastBackupFolder=folder)
         return BackupReader.read(folder)
 
     def save_patch(self, message: dict) -> str | None:
@@ -584,6 +665,7 @@ class EditorHost:
             if os.path.lexists(path):
                 raise HostError(f"{os.path.basename(path)} already exists. Choose another name.")
         self.last_export_folder = os.path.dirname(path)
+        self._remember(lastExportFolder=self.last_export_folder)
         write_file_atomically(path, data)
         return os.path.basename(path)
 
@@ -594,10 +676,15 @@ class EditorHost:
         if parent is None:
             return None
         self.last_export_folder = parent
+        self._remember(lastExportFolder=parent)
         return write_patch_folder(parent, files, name)  # type: ignore[arg-type]
 
     def _export_start(self) -> str | None:
         return self.last_export_folder or self.last_folder
+
+    def _remember(self, **folders: str) -> None:
+        if self.settings:
+            self.settings.update(**folders)
 
 
 # MARK: - Lifetime
@@ -725,11 +812,19 @@ BRIDGE_SHIM = r"""
       if (type === 'message') listeners.delete(listener);
     },
   };
-  const alive = () => post('/api/alive', { tab }).catch(() => {});
+  // The window's bounds go with every heartbeat, so an app window can reopen
+  // at the same size and place next time.
+  const bounds = () => ({
+    x: screenX, y: screenY, width: outerWidth, height: outerHeight,
+    maximized: outerWidth >= screen.availWidth && outerHeight >= screen.availHeight,
+  });
+  const alive = () => post('/api/alive', { tab, window: bounds() }).catch(() => {});
   alive();
   setInterval(alive, 20000);
+  let resized;
+  addEventListener('resize', () => { clearTimeout(resized); resized = setTimeout(alive, 500); });
   addEventListener('pageshow', event => { if (event.persisted) alive(); });
-  addEventListener('pagehide', () => navigator.sendBeacon('/api/bye', tab));
+  addEventListener('pagehide', () => navigator.sendBeacon('/api/bye', JSON.stringify({ tab, window: bounds() })));
 })();
 """
 
@@ -755,6 +850,12 @@ def build_page(html: str, version: str) -> bytes:
     html = CSP_META.sub(lambda _: meta + "\n<script>" + BRIDGE_SHIM + "</script>", html, count=1)
     return html.replace("{{EDITOR_VERSION}}", version).encode("utf-8")
 
+
+# The launch address is LAUNCH_PATH?launch=<token>. The token is in the query
+# so the path stays the same: Chromium names app windows (the Wayland app id
+# and X11 window class) after the address's host and path, and a stable name
+# lets the desktop show the editor's icon for its window (see install()).
+LAUNCH_PATH = "/oot-sw2se"
 
 FORBIDDEN_PAGE = (
     "<!doctype html><meta charset=utf-8><title>OOT SW2SE</title>"
@@ -788,13 +889,22 @@ class EditorServer(http.server.ThreadingHTTPServer):
         self.session = secrets.token_urlsafe(32)
         self._launch_lock = threading.Lock()
         self._launch: str | None = secrets.token_urlsafe(32)
-        self.launch_url = f"{self.origin}/launch/{self._launch}"
+        self.launch_url = f"{self.origin}{LAUNCH_PATH}?launch={self._launch}"
+        # Bounds of the app window, reported by the page; only kept while the
+        # editor runs in an app window (not in a tab of a normal browser).
+        self.track_window = False
+        self.window: dict | None = None
 
     def new_launch_url(self) -> str:
         """Replaces the launch token, e.g. when a second browser is tried."""
         with self._launch_lock:
             self._launch = secrets.token_urlsafe(32)
-            return f"{self.origin}/launch/{self._launch}"
+            return f"{self.origin}{LAUNCH_PATH}?launch={self._launch}"
+
+    def note_window(self, value: object) -> None:
+        bounds = window_bounds(value) if self.track_window else None
+        if bounds:
+            self.window = bounds
 
     def consume_launch(self, token: str) -> bool:
         """True once for the launch token; it can't be used a second time."""
@@ -849,9 +959,10 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 (base class name)
         if not self._host_ok():
             return self._send(403, b"Forbidden")
-        path = self.path.split("?", 1)[0]
-        if path.startswith("/launch/"):
-            if self.server.consume_launch(path[len("/launch/"):]):
+        path, _, query = self.path.partition("?")
+        if path == LAUNCH_PATH:
+            token = urllib.parse.parse_qs(query).get("launch", [""])[0]
+            if self.server.consume_launch(token):
                 cookie = f"{self.server.cookie_name}={self.server.session}; Path=/; HttpOnly; SameSite=Strict"
                 return self._send(303, headers=(("Location", "/"), ("Set-Cookie", cookie)))
             if self._session_ok():
@@ -880,7 +991,16 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         if path == "/api/bye":
             # Sent with navigator.sendBeacon, which can't add headers; the
             # SameSite=Strict cookie already proves it comes from the page.
-            self.server.lifetime.closed(body.decode("utf-8", "replace").strip(), now)
+            # The body is {"tab": ..., "window": ...} as text/plain.
+            text = body.decode("utf-8", "replace").strip()
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = None
+            if isinstance(data, dict):
+                self.server.note_window(data.get("window"))
+                text = str(data.get("tab", ""))
+            self.server.lifetime.closed(text, now)
             return self._send(204)
 
         # A cross-site page can't send this header without a CORS preflight,
@@ -901,6 +1021,7 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
             if not isinstance(tab, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", tab):
                 return self._send(400, b"Invalid tab")
             self.server.lifetime.alive(tab, now)
+            self.server.note_window(message.get("window"))
             return self._send(204)
         if path == "/api/request":
             with self.server.lifetime.busy(self.server.clock):
@@ -923,6 +1044,36 @@ def _installed_paths() -> tuple[str, str, str]:
             os.path.join(_data_home(), "icons", "hicolor"))
 
 
+# Prefixes Chromium-based browsers put before an app window's name. Vivaldi's
+# was measured (vivaldi-127.0.0.1__oot-sw2se-Default); the others follow
+# their usual naming. A file for a browser that isn't installed does nothing.
+WINDOW_CLASS_PREFIXES = ("vivaldi", "chrome", "chromium", "brave", "msedge")
+
+
+def window_classes() -> list[str]:
+    """The app ids (Wayland) and window classes (X11) the editor's app window
+    gets in each browser: <prefix>-<host>_<path with / as _>-<profile>. The
+    temporary profile is always named Default."""
+    name = "127.0.0.1_" + LAUNCH_PATH.replace("/", "_")
+    return [f"{prefix}-{name}-Default" for prefix in WINDOW_CLASS_PREFIXES]
+
+
+def window_desktop_entry(window_class: str, exec_value: str) -> str:
+    """A hidden .desktop file, named after the window class, that tells the
+    desktop which icon and name the editor's app window has. Pinning that
+    window to a task bar starts the editor."""
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        f"Name={APP_NAME}\n"
+        f"Exec={exec_value}\n"
+        f"Icon={APP_ID}\n"
+        f"StartupWMClass={window_class}\n"
+        "Terminal=false\n"
+        "NoDisplay=true\n"
+    )
+
+
 def install() -> int:
     """Copies the built app to ~/.local/bin and adds a menu entry and icon."""
     if os.environ.get("APPIMAGE"):
@@ -942,6 +1093,9 @@ def install() -> int:
     write_icons(icon_root)
     os.makedirs(os.path.dirname(desktop_file), exist_ok=True)
     write_file_atomically(desktop_file, desktop_entry(desktop_exec_quote(program)).encode("utf-8"))
+    for window_class in window_classes():
+        write_file_atomically(os.path.join(os.path.dirname(desktop_file), window_class + ".desktop"),
+                              window_desktop_entry(window_class, desktop_exec_quote(program)).encode("utf-8"))
     _refresh_desktop_database(os.path.dirname(desktop_file))
     print(f"Installed {APP_NAME} {editor_version()}:\n  {program}\n  {desktop_file}")
     return 0
@@ -952,6 +1106,7 @@ def uninstall() -> int:
     program, desktop_file, icon_root = _installed_paths()
     removed = []
     paths = [program, desktop_file]
+    paths += [os.path.join(os.path.dirname(desktop_file), name + ".desktop") for name in window_classes()]
     with contextlib.suppress(OSError):
         paths += [os.path.join(icon_root, size, "apps", APP_ID + ".png") for size in os.listdir(icon_root)]
     for path in paths:
@@ -964,9 +1119,16 @@ def uninstall() -> int:
 
 
 def _refresh_desktop_database(folder: str) -> None:
+    """Lets the desktop notice changed .desktop files without a new login."""
     tool = shutil.which("update-desktop-database")
     if tool and os.path.isdir(folder):
         subprocess.run([tool, "-q", folder], stdin=subprocess.DEVNULL, check=False)
+    for name in ("kbuildsycoca6", "kbuildsycoca5"):  # KDE's cache of .desktop files
+        tool = shutil.which(name)
+        if tool:
+            subprocess.run([tool], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, check=False)
+            break
 
 
 # MARK: - Browser
@@ -1027,16 +1189,24 @@ class AppWindow:
 
     WIDTH, HEIGHT = 1100, 730  # The editor size of the Windows and macOS hosts.
 
-    def __init__(self, browser: str, verbose: bool = False) -> None:
+    def __init__(self, browser: str, verbose: bool = False, window: object = None) -> None:
         self.browser = browser
         self.verbose = verbose
+        # Size, position and maximized state from the last run, if any.
+        self.window = window_bounds(window)
         self.profile = tempfile.mkdtemp(prefix="oot-sw2se-browser-")
         self.process: subprocess.Popen | None = None
 
     def command(self, url: str) -> list[str]:
-        return [self.browser, "--app=" + url, "--user-data-dir=" + self.profile,
-                f"--window-size={self.WIDTH},{self.HEIGHT}", "--class=" + APP_NAME,
-                "--no-first-run", "--no-default-browser-check", "--disable-sync",
+        window = self.window or {"width": self.WIDTH, "height": self.HEIGHT}
+        placement = [f"--window-size={window['width']},{window['height']}"]
+        if "x" in window:
+            # Wayland compositors place windows themselves and ignore this.
+            placement.append(f"--window-position={window['x']},{window['y']}")
+        if window.get("maximized"):
+            placement.append("--start-maximized")
+        return [self.browser, "--app=" + url, "--user-data-dir=" + self.profile, *placement,
+                "--class=" + APP_NAME, "--no-first-run", "--no-default-browser-check", "--disable-sync",
                 # A new profile would otherwise ask KWallet or GNOME Keyring
                 # to unlock; the editor stores no passwords.
                 "--password-store=basic"]
@@ -1111,8 +1281,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
+    settings = Settings()
     lifetime = Lifetime(time.monotonic(), launch_timeout=None if args.no_browser else 120.0)
-    server = EditorServer(EditorHost(Dialogs()), lifetime, page, verbose=args.verbose)
+    server = EditorServer(EditorHost(Dialogs(), settings), lifetime, page, verbose=args.verbose)
     thread = threading.Thread(target=server.serve_forever, name="http", daemon=True)
     thread.start()
     print(f"{APP_NAME} is running. Open this address once, in your browser:\n  {server.launch_url}\n"
@@ -1130,10 +1301,11 @@ def main(argv: list[str] | None = None) -> int:
     windows: list[AppWindow] = []  # Every window started, to clean up at exit.
     browser = None if args.no_browser or args.tab else find_app_browser()
     if browser:
-        window = AppWindow(browser, verbose=args.verbose)
+        window = AppWindow(browser, verbose=args.verbose, window=settings.values.get("window"))
         windows.append(window)
         if window.open(server.launch_url):
             print(f"Opening an app window with {browser}.", flush=True)
+            server.track_window = True
         else:
             window = None
     if not args.no_browser and window is None:
@@ -1149,6 +1321,7 @@ def main(argv: list[str] | None = None) -> int:
                     # The browser failed before showing the editor: use a tab.
                     print(f"{window.browser} could not open the editor; using the default browser.", flush=True)
                     window.close()
+                    server.track_window = False
                     tab_or_warn(server.new_launch_url(), lifetime)
                 # A zero exit code without the page means a launcher handed
                 # the window over to another process; the heartbeats tell
@@ -1165,6 +1338,8 @@ def main(argv: list[str] | None = None) -> int:
             started.close()
         server.shutdown()
         server.server_close()
+        if server.track_window and server.window:
+            settings.update(window=remembered_window(settings.values.get("window"), server.window))
     return 0
 
 

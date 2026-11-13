@@ -322,17 +322,19 @@ class ServerTests(TempDirTest):
         return json.loads(response.body)  # type: ignore[attr-defined]
 
     def test_launch_sets_cookie_once(self) -> None:
-        token = self.server.launch_url.rsplit("/", 1)[1]
+        launch = self.server.launch_url[len(self.server.origin):]
+        self.assertTrue(launch.startswith("/oot-sw2se?launch="), "stable path, token in the query")
         self.assertEqual(self.request("GET", "/", cookie=False, api=False).status, 403)
-        self.assertEqual(self.request("GET", "/launch/wrong", cookie=False, api=False).status, 403)
-        response = self.request("GET", "/launch/" + token, cookie=False, api=False)
+        self.assertEqual(self.request("GET", "/oot-sw2se?launch=wrong", cookie=False, api=False).status, 403)
+        self.assertEqual(self.request("GET", "/oot-sw2se", cookie=False, api=False).status, 403)
+        response = self.request("GET", launch, cookie=False, api=False)
         self.assertEqual(response.status, 303)
         self.assertEqual(response.getheader("Location"), "/")
         cookie = response.getheader("Set-Cookie")
         self.assertIn(self.cookie, cookie)
         self.assertIn("HttpOnly", cookie)
         self.assertIn("SameSite=Strict", cookie)
-        self.assertEqual(self.request("GET", "/launch/" + token, cookie=False, api=False).status, 403)
+        self.assertEqual(self.request("GET", launch, cookie=False, api=False).status, 403)
         page = self.request("GET", "/", api=False)
         self.assertEqual((page.status, page.body), (200, b"<page>"))  # type: ignore[attr-defined]
 
@@ -407,6 +409,20 @@ class ServerTests(TempDirTest):
         first.join(10)
         self.assertEqual(results, [{"id": 11, "result": None, "error": None}])
 
+    def test_window_bounds_are_kept_only_for_app_windows(self) -> None:
+        bounds = {"x": 10, "y": 20, "width": 900, "height": 600, "maximized": False}
+        self.request("POST", "/api/alive", {"tab": "a", "window": bounds})
+        self.assertIsNone(self.server.window, "a tab of a normal browser is not remembered")
+        self.server.track_window = True
+        self.request("POST", "/api/alive", {"tab": "a", "window": bounds})
+        self.assertEqual(self.server.window, bounds)
+        self.request("POST", "/api/alive", {"tab": "a", "window": {"width": "big"}})
+        self.assertEqual(self.server.window, bounds, "invalid bounds are ignored")
+        closing = {**bounds, "width": 1000}
+        self.request("POST", "/api/bye", json.dumps({"tab": "a", "window": closing}).encode(), api=False,
+                     headers={"Content-Type": "text/plain;charset=UTF-8"})
+        self.assertEqual(self.server.window, closing)
+
     def test_heartbeat_and_goodbye(self) -> None:
         self.assertEqual(self.request("POST", "/api/alive", {"tab": "abc-123"}).status, 204)
         self.assertEqual(self.request("POST", "/api/alive", {"tab": "../x"}).status, 400)
@@ -417,11 +433,70 @@ class ServerTests(TempDirTest):
         self.assertEqual(self.lifetime._tabs, {})
 
 
+class SettingsTests(TempDirTest):
+    def test_round_trip_and_fallback(self) -> None:
+        config = os.path.join(self.root, "config", "OOT-SW2SE")
+        data = os.path.join(self.root, "data", "OOT-SW2SE")
+        settings = host.Settings([config, data])
+        self.assertEqual(settings.values, {})
+        self.assertTrue(settings.update(lastBackupFolder=self.root))
+        self.assertTrue(os.path.isfile(os.path.join(config, "settings.json")))
+        self.assertEqual(host.Settings([config, data]).folder("lastBackupFolder"), self.root)
+        # A config folder that can't be created falls back to the data folder.
+        blocked = os.path.join(self.root, "file")
+        write(blocked)
+        settings = host.Settings([os.path.join(blocked, "OOT-SW2SE"), data])
+        self.assertTrue(settings.update(lastExportFolder=self.root))
+        self.assertTrue(os.path.isfile(os.path.join(data, "settings.json")))
+        self.assertFalse(host.Settings([os.path.join(blocked, "x")]).update(a=1), "nothing writable")
+
+    def test_bad_or_stale_values_are_ignored(self) -> None:
+        folder = os.path.join(self.root, "config")
+        write(os.path.join(folder, "settings.json"), b"{not json")
+        self.assertEqual(host.Settings([folder]).values, {})
+        write(os.path.join(folder, "settings.json"), json.dumps({"lastBackupFolder": "/does/not/exist"}).encode())
+        self.assertIsNone(host.Settings([folder]).folder("lastBackupFolder"))
+
+    def test_folders_are_remembered_across_runs(self) -> None:
+        folder = os.path.join(self.root, "config")
+        saves = os.path.join(self.root, "saves", "slot_00")
+        save_pair(saves)
+        dialogs = FakeDialogs()
+        dialogs.folder = saves
+        host.EditorHost(dialogs, host.Settings([folder])).open_backup()
+        dialogs.folder = None
+        later = host.EditorHost(dialogs, host.Settings([folder]))
+        later.open_backup()
+        self.assertEqual(dialogs.calls[-1][2], saves, "the next run starts in the last backup folder")
+        later.save_patch({"name": "p.zip", "contents": base64.b64encode(b"PK\x03\x04" + bytes(30)).decode()})
+        self.assertEqual(dialogs.calls[-1][2], saves, "exports start there too until something is exported")
+
+    def test_window_bounds(self) -> None:
+        good = {"x": -5, "y": 0, "width": 900.4, "height": 600, "maximized": True}
+        self.assertEqual(host.window_bounds(good), {"x": -5, "y": 0, "width": 900, "height": 600, "maximized": True})
+        for bad in [None, [], {"width": 900, "height": 600}, {**good, "width": 50}, {**good, "x": True},
+                    {**good, "height": "600"}]:
+            self.assertIsNone(host.window_bounds(bad), bad)
+        normal = {"x": 1, "y": 2, "width": 900, "height": 600, "maximized": False}
+        maximized = {"x": 0, "y": 0, "width": 2560, "height": 1400, "maximized": True}
+        self.assertEqual(host.remembered_window(normal, maximized), {**normal, "maximized": True},
+                         "maximizing keeps the size to return to")
+        self.assertEqual(host.remembered_window(None, maximized), maximized)
+        self.assertEqual(host.remembered_window(maximized, normal), normal)
+
+    def test_window_classes_match_the_measured_vivaldi_app_id(self) -> None:
+        self.assertIn("vivaldi-127.0.0.1__oot-sw2se-Default", host.window_classes())
+        entry = host.window_desktop_entry("vivaldi-127.0.0.1__oot-sw2se-Default", "/x/oot-sw2se")
+        self.assertIn("Icon=oot-sw2se\n", entry)
+        self.assertIn("StartupWMClass=vivaldi-127.0.0.1__oot-sw2se-Default\n", entry)
+        self.assertIn("NoDisplay=true\n", entry)
+
+
 # A stand-in browser: loads the editor like a real one (launch URL, cookie,
 # page, heartbeat), logs its arguments, then stays FAKE_STAY seconds. With
 # FAKE_FAIL=<its name> it fails at once instead.
 FAKE_BROWSER = r'''#!{python}
-import http.cookiejar, os, sys, time, urllib.request
+import http.cookiejar, json, os, sys, time, urllib.parse, urllib.request
 name = os.path.basename(sys.argv[0])
 args = sys.argv[1:]
 with open(os.environ["FAKE_LOG"], "a") as log:
@@ -431,8 +506,10 @@ if os.environ.get("FAKE_FAIL") == name:
 url = next((arg[len("--app="):] for arg in args if arg.startswith("--app=")), args[-1])
 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
 page = opener.open(url).read()
-origin = url.split("/launch/")[0]
-opener.open(urllib.request.Request(origin + "/api/alive", data=b'{{"tab": "fake"}}', headers={{
+parts = urllib.parse.urlsplit(url)
+origin = parts.scheme + "://" + parts.netloc
+alive = {{"tab": "fake", "window": json.loads(os.environ.get("FAKE_WINDOW", "null"))}}
+opener.open(urllib.request.Request(origin + "/api/alive", data=json.dumps(alive).encode(), headers={{
     "Content-Type": "application/json", "X-OOT-SW2SE": "1", "Origin": origin}}))
 with open(os.environ["FAKE_LOG"], "a") as log:
     log.write("loaded " + name + " " + str(b"window.chrome.webview" in page) + "\n")
@@ -457,7 +534,8 @@ class AppWindowTests(TempDirTest):
     def env(self, **extra: str) -> dict:
         self.tmp = os.path.join(self.root, "tmp")
         os.makedirs(self.tmp, exist_ok=True)
-        return {"PATH": self.bin, "HOME": self.root, "TMPDIR": self.tmp, "FAKE_LOG": self.log, **extra}
+        return {"PATH": self.bin, "HOME": self.root, "TMPDIR": self.tmp, "FAKE_LOG": self.log,
+                "XDG_CONFIG_HOME": os.path.join(self.root, "config"), **extra}
 
     def read_log(self) -> list[str]:
         try:
@@ -483,6 +561,36 @@ class AppWindowTests(TempDirTest):
         with mock.patch.dict(os.environ, {"PATH": self.bin}, clear=True), \
                 mock.patch.object(host, "default_browser_id", return_value="firefox.desktop"):
             self.assertIsNone(host.find_app_browser())
+
+    def test_window_reopens_with_the_remembered_size_and_place(self) -> None:
+        self.fake("chromium", "xdg-open")
+        window = json.dumps({"x": 10, "y": 20, "width": 900, "height": 600, "maximized": False})
+        process = self.run_main(FAKE_STAY="0.5", FAKE_WINDOW=window)
+        process.communicate(timeout=30)
+        settings = os.path.join(self.root, "config", "OOT-SW2SE", "settings.json")
+        with open(settings) as file:
+            self.assertEqual(json.load(file)["window"], json.loads(window))
+        os.unlink(self.log)
+        process = self.run_main(FAKE_STAY="0.5")
+        process.communicate(timeout=30)
+        first = self.read_log()[0]
+        self.assertIn("--window-size=900,600", first)
+        self.assertIn("--window-position=10,20", first)
+        self.assertNotIn("--start-maximized", first)
+
+    def test_window_command(self) -> None:
+        default = host.AppWindow("chromium")
+        maximized = host.AppWindow("chromium", window={"x": 5, "y": 6, "width": 800, "height": 500, "maximized": True})
+        broken = host.AppWindow("chromium", window={"width": 20, "height": 20, "x": 0, "y": 0})
+        try:
+            self.assertIn("--window-size=1100,730", default.command("u"))
+            self.assertFalse([arg for arg in default.command("u") if arg.startswith("--window-position")])
+            self.assertIn("--start-maximized", maximized.command("u"))
+            self.assertIn("--window-size=800,500", maximized.command("u"))
+            self.assertIn("--window-size=1100,730", broken.command("u"), "implausible sizes are ignored")
+        finally:
+            for window in (default, maximized, broken):
+                window.close()
 
     def test_window_uses_and_removes_a_temporary_profile(self) -> None:
         window = host.AppWindow("/usr/bin/chromium")
