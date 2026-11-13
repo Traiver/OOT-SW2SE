@@ -70,10 +70,18 @@ linux/build.sh --appimage    # or: APPIMAGETOOL=/path/to/appimagetool linux/buil
 This also writes `linux/dist/OOT_SW2SE-<version>-<arch>.AppImage`. It runs the
 same `.pyz` with the system's `python3`, so the requirements above still
 apply. While building, `appimagetool` downloads the AppImage runtime from
-GitHub, so this step needs network access. Tested with `appimagetool`
+GitHub, so this step needs network access, and the runtime is whatever
+version is current. To use a fixed one, download `runtime-<arch>` from the
+[type2-runtime releases](https://github.com/AppImage/type2-runtime/releases)
+and set `APPIMAGE_RUNTIME=/path/to/runtime-<arch>`. Tested with `appimagetool`
 continuous build 370 on CachyOS (KDE Plasma 6.8, Wayland): the AppImage
 starts the editor in its app window and ends, unmounting itself, when the
 window is closed.
+
+GitHub Actions builds the AppImage with `appimagetool` 1.9.1 and runtime
+20251108, both checked against their SHA-256
+([`.github/workflows/linux.yml`](../.github/workflows/linux.yml)), and attaches
+it to releases as `OOT-SW2SE-<version>-linux-x86_64.AppImage`.
 
 The AppImage can add itself to the application menu with `--install`, like
 the `.pyz` (see [Add it to the application menu](#add-it-to-the-application-menu)).

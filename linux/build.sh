@@ -10,6 +10,9 @@
 #   --appimage  also builds linux/dist/OOT_SW2SE-<version>-<arch>.AppImage
 #               with appimagetool (from PATH, or set APPIMAGETOOL=/path/to/it).
 #               The AppImage starts the same .pyz with the system's python3.
+#               appimagetool downloads the AppImage runtime while building
+#               unless APPIMAGE_RUNTIME=/path/to/runtime-<arch> names a local
+#               copy (from https://github.com/AppImage/type2-runtime/releases).
 #
 # Files are assembled in .build first and only replace those in dist once
 # every step has succeeded, so a failed build keeps the last good one.
@@ -29,7 +32,7 @@ appimage=0
 for arg in "$@"; do
   case "$arg" in
     --appimage) appimage=1 ;;
-    -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "error: unknown option $arg (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -126,7 +129,11 @@ exec python3 -I "$here/usr/lib/oot-sw2se/oot-sw2se.pyz" "$@"
 SH
   chmod 755 "$appdir/AppRun"
 
-  ARCH="$arch" "$tool" --no-appstream "$appdir" "$build/OOT_SW2SE-$version-$arch.AppImage" >&2
+  runtime=()
+  if [[ -n "${APPIMAGE_RUNTIME:-}" ]]; then
+    runtime=(--runtime-file "$APPIMAGE_RUNTIME")
+  fi
+  ARCH="$arch" "$tool" --no-appstream "${runtime[@]}" "$appdir" "$build/OOT_SW2SE-$version-$arch.AppImage" >&2
 fi
 
 # Everything succeeded: swap the new files in for the old ones.
