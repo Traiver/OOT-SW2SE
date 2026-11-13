@@ -1269,21 +1269,35 @@ def window_desktop_entry(window_class: str, exec_value: str) -> str:
 
 
 def install() -> int:
-    """Copies the built app to ~/.local/bin and adds a menu entry and icon."""
-    if os.environ.get("APPIMAGE"):
-        print("The AppImage can't install itself; use an AppImage integration tool instead.", file=sys.stderr)
-        return 1
-    if not os.path.isfile(HERE):
+    """Adds a menu entry, the icon and the hidden app window entries.
+
+    The .pyz copies itself to ~/.local/bin and the entries start that copy.
+    The AppImage stays where it is (the AppImage runtime passes its path in
+    APPIMAGE) and the entries start the AppImage file; a copy left in
+    ~/.local/bin by an earlier .pyz install is removed, so only one is used.
+    """
+    copy, desktop_file, icon_root = _installed_paths()
+    appimage = os.environ.get("APPIMAGE")
+    if appimage:
+        program = os.path.abspath(appimage)
+        if not os.path.isfile(program):
+            print(f"The AppImage was not found at {program}.", file=sys.stderr)
+            return 1
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(copy)
+            print(f"Removed the copy from an earlier install: {copy}")
+    elif not os.path.isfile(HERE):
         print("Only the built app can install itself. Run linux/build.sh, then "
               "linux/dist/oot-sw2se.pyz --install.", file=sys.stderr)
         return 1
-    program, desktop_file, icon_root = _installed_paths()
-    os.makedirs(os.path.dirname(program), exist_ok=True)
-    if os.path.abspath(program) != HERE:
-        with open(HERE, "rb") as file:
-            data = file.read()
-        write_file_atomically(program, data)
-    os.chmod(program, 0o755)
+    else:
+        program = copy
+        os.makedirs(os.path.dirname(program), exist_ok=True)
+        if os.path.abspath(program) != HERE:
+            with open(HERE, "rb") as file:
+                data = file.read()
+            write_file_atomically(program, data)
+        os.chmod(program, 0o755)
     write_icons(icon_root)
     os.makedirs(os.path.dirname(desktop_file), exist_ok=True)
     write_file_atomically(desktop_file, desktop_entry(desktop_exec_quote(program)).encode("utf-8"))
@@ -1296,7 +1310,7 @@ def install() -> int:
 
 
 def uninstall() -> int:
-    """Removes what install() added."""
+    """Removes what install() added. An AppImage file itself is kept."""
     program, desktop_file, icon_root = _installed_paths()
     removed = []
     paths = [program, desktop_file]
@@ -1456,7 +1470,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-browser", action="store_true",
                         help="print the editor URL instead of opening a browser")
     parser.add_argument("--install", action="store_true",
-                        help="copy the app to ~/.local/bin and add it to the application menu")
+                        help="add the app to the application menu (the .pyz copies itself to "
+                             "~/.local/bin; the AppImage is started from where it is)")
     parser.add_argument("--uninstall", action="store_true", help="undo --install")
     parser.add_argument("--verbose", action="store_true", help="log every HTTP request and the browser's output")
     parser.add_argument("--version", action="store_true", help="print the version and exit")

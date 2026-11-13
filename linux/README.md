@@ -75,10 +75,9 @@ continuous build 370 on CachyOS (KDE Plasma 6.8, Wayland): the AppImage
 starts the editor in its app window and ends, unmounting itself, when the
 window is closed.
 
-The AppImage can't run `--install`. Integrate it with your desktop's AppImage
-tool instead. The app window then shows the browser's icon in the task bar,
-because the hidden entries that give it the editor's icon come from
-`--install` (see [Browser window](#browser-window)).
+The AppImage can add itself to the application menu with `--install`, like
+the `.pyz` (see [Add it to the application menu](#add-it-to-the-application-menu)).
+Without it, the app window shows the browser's icon in the task bar.
 
 You can also run the editor straight from a checkout, without building it:
 
@@ -172,9 +171,29 @@ This copies the app to `~/.local/bin/oot-sw2se` and adds a menu entry and
 icon for your user. It also adds hidden entries that give the editor's app
 window its own icon and name in the task bar instead of the browser's (see
 [Browser window](#browser-window)). `oot-sw2se --uninstall` removes all of
-them again. For the
-AppImage, use your desktop's AppImage integration (for example Gear Lever or
-AppImageLauncher) instead.
+them again.
+
+The AppImage works the same way, but it isn't copied:
+
+```sh
+./OOT_SW2SE-1.0.2-x86_64.AppImage --install
+```
+
+The menu entry and the hidden entries start the AppImage from where it is, so
+put it in its final place first. If you move or rename it later, run
+`--install` again from the new place. If an earlier `.pyz` install left
+`~/.local/bin/oot-sw2se`, that copy is removed, so the menu starts only the
+AppImage. `--uninstall` (run from the AppImage) removes the entries and the
+icon but keeps the AppImage file.
+
+**AppImage tools such as Gear Lever or AppImageLauncher:** these add their own
+menu entry for an AppImage, so together with `--install` the editor shows up
+**twice in the application menu**. Hide or remove one of the two in your menu
+editor, or skip the tool's integration. These tools usually move the AppImage
+into their own folder, so integrate it first and then run `--install` from the
+moved file; otherwise the entries from `--install` point to the old place. The
+task bar icon of the app window comes only from `--install`: the tools don't
+add the hidden entries (see [Browser window](#browser-window)).
 
 ### Options
 
@@ -182,7 +201,7 @@ AppImageLauncher) instead.
 | -------------- | ------------------------------------------------------------------- |
 | `--tab`        | Open a tab of the default browser even if a Chromium-based browser is installed |
 | `--no-browser` | Print the editor address instead of opening a browser               |
-| `--install`    | Add the app to `~/.local/bin` and the application menu              |
+| `--install`    | Add the app to the application menu (the `.pyz` copies itself to `~/.local/bin`; the AppImage is started from where it is) |
 | `--uninstall`  | Undo `--install`                                                    |
 | `--verbose`    | Log every HTTP request and the browser's output                     |
 | `--version`    | Print the version                                                   |

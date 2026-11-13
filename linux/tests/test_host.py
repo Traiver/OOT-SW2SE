@@ -496,6 +496,68 @@ class SettingsTests(TempDirTest):
         self.assertIn("NoDisplay=true\n", entry)
 
 
+class InstallTests(TempDirTest):
+    """--install and --uninstall in a stand-in home folder."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.home = os.path.join(self.root, "home")
+        self.data = os.path.join(self.home, ".local", "share")
+        self.copy = os.path.join(self.home, ".local", "bin", "oot-sw2se")
+        self.menu = os.path.join(self.data, "applications", "oot-sw2se.desktop")
+        self.window = os.path.join(self.data, "applications", "vivaldi-127.0.0.1__oot-sw2se-Default.desktop")
+        self.icon = os.path.join(self.data, "icons", "hicolor", "256x256", "apps", "oot-sw2se.png")
+        for patcher in (mock.patch.dict(os.environ, {"HOME": self.home, "XDG_DATA_HOME": self.data}),
+                        mock.patch.object(host, "_refresh_desktop_database"),
+                        mock.patch("sys.stdout", new=open(os.devnull, "w"))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(sys.stdout.close)
+        os.environ.pop("APPIMAGE", None)
+
+    def read(self, path: str) -> str:
+        with open(path, encoding="utf-8") as file:
+            return file.read()
+
+    def test_pyz_copies_itself_and_points_the_entries_at_the_copy(self) -> None:
+        pyz = os.path.join(self.root, "oot-sw2se.pyz")
+        write(pyz, b"zipapp")
+        # Moving HERE to the stand-in .pyz hides the checkout's resources.
+        resources = {name: host.resource(name) for name in ("editor.ico", "Program.cs")}
+        with mock.patch.object(host, "HERE", pyz), mock.patch.object(host, "resource", resources.__getitem__):
+            self.assertEqual(host.install(), 0)
+        with open(self.copy, "rb") as file:
+            self.assertEqual(file.read(), b"zipapp")
+        self.assertIn(f"Exec={self.copy}\n", self.read(self.menu))
+        self.assertIn(f"Exec={self.copy}\n", self.read(self.window))
+        self.assertTrue(os.path.isfile(self.icon))
+
+    def test_appimage_is_started_from_where_it_is(self) -> None:
+        appimage = os.path.join(self.root, "My Apps", "OOT_SW2SE-1.0.2-x86_64.AppImage")
+        write(appimage, b"appimage")
+        write(self.copy, b"older pyz install")
+        with mock.patch.dict(os.environ, {"APPIMAGE": appimage}):
+            self.assertEqual(host.install(), 0)
+        exec_line = f"Exec={host.desktop_exec_quote(appimage)}\n"
+        self.assertIn('"', exec_line, "the space in the path is quoted")
+        self.assertIn(exec_line, self.read(self.menu))
+        self.assertIn(exec_line, self.read(self.window))
+        self.assertTrue(os.path.isfile(self.icon))
+        self.assertFalse(os.path.exists(self.copy), "the older copy is removed")
+
+        self.assertEqual(host.uninstall(), 0)
+        for path in (self.menu, self.window, self.icon):
+            self.assertFalse(os.path.exists(path), path)
+        self.assertTrue(os.path.isfile(appimage), "--uninstall keeps the AppImage")
+
+    def test_missing_appimage_is_refused(self) -> None:
+        with mock.patch.dict(os.environ, {"APPIMAGE": os.path.join(self.root, "gone.AppImage")}), \
+                mock.patch("sys.stderr", new=open(os.devnull, "w")) as stderr:
+            self.assertEqual(host.install(), 1)
+        stderr.close()
+        self.assertFalse(os.path.exists(self.menu))
+
+
 SAVE = b"\x04\x03\x02\x01"  # The header every .sav file starts with.
 
 
