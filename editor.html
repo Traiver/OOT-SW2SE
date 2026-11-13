@@ -243,6 +243,7 @@ html.landing { overflow: hidden; }
   <section id="export-section">
     <h2>Save Patch</h2>
     <div class="controls">
+      <button id="save-back" type="submit" form="edit" hidden>Save Back</button>
       <button id="export" class="primary" type="submit" form="edit">Save Patch ZIP</button>
       <button id="export-folder" type="submit" form="edit">Export to Folder</button>
       <button id="reset" type="button">Reset All Edits</button>
@@ -324,11 +325,21 @@ const desktop = (() => {
     })) });
   }
 
+  // Save Back: write the edited files over the opened ones. Only hosts that
+  // announce it in hostFeatures offer it (currently the Linux host).
+  const features = host.hostFeatures || {};
+
+  function saveBack(entries) {
+    return send('saveBack', { files: entries.map(([path, bytes]) => ({
+      relativePath: path, contents: base64(typeof bytes === 'string' ? utf8.encode(bytes) : bytes),
+    })) });
+  }
+
   function setWorkspaceLoaded(loaded) {
     host.postMessage({ action: 'workspace', loaded });
   }
 
-  return { openBackup, savePatch, saveFolder, setWorkspaceLoaded };
+  return { openBackup, savePatch, saveFolder, saveBack, features, setWorkspaceLoaded };
 })();
 
 const HEX = (n, width = 8) => '0x' + n.toString(16).toUpperCase().padStart(width, '0');
@@ -465,6 +476,36 @@ function readSlot(progress, caption) {
     return [id, p.int(progress) / (fromLegacyEditor ? 1 : scale)];
   }));
   return { p, c, w, rupees, capacities, counts, bottles, vitals, legacyMagic };
+}
+
+// Save time, newest slot and ZIP timestamps: added by aut0mat3d/Claude (2026),
+// vibe-coded with Claude (Anthropic); MIT License like the rest of the editor.
+// See "Save time: newest slot and ZIP timestamps" in README.md.
+
+// The in-game save time from caption.sav: the local date and time of the
+// console (or emulator) when the slot was saved, to the second.
+function saveTime(c) {
+  const t = {
+    year: c.int(0x9811A3F7), month: c.int(0xDFD840D3), day: c.int(0xBD46F485),
+    hour: c.int(0x23F3D75E), minute: c.int(0x27853BF7),
+    second: c.fields.has(0x5EE50BED) ? c.int(0x5EE50BED) : 0, auto: c.int(0x25F03CAA) !== 0,
+  };
+  t.valid = t.year >= 1980 && t.year <= 2107 && t.month >= 1 && t.month <= 12 && t.day >= 1 && t.day <= 31 &&
+    t.hour >= 0 && t.hour <= 23 && t.minute >= 0 && t.minute <= 59 && t.second >= 0 && t.second <= 59;
+  return t;
+}
+
+function formatSaveTime(t) {
+  const pad = n => String(n).padStart(2, '0');
+  return pad(t.day) + '.' + pad(t.month) + '.' + t.year + ' · ' + pad(t.hour) + ':' + pad(t.minute) + ':' +
+    pad(t.second) + ' · ' + (t.auto ? "autosave" : "manual save");
+}
+
+// Picks the most recently saved slot by in-game save time. Slots without a
+// valid save time come last; on a tie (same second) the lower slot number wins.
+function newestSlot(slots) {
+  const key = t => t?.valid ? Date.UTC(t.year, t.month - 1, t.day, t.hour, t.minute, t.second) : -Infinity;
+  return slots.reduce((best, slot) => key(slot.time) > key(best.time) ? slot : best, slots[0]);
 }
 
 function readOptions(bytes) {
@@ -727,7 +768,21 @@ function crc32(bytes) {
   return (n ^ 0xFFFFFFFF) >>> 0;
 }
 
-function zip(entries) {
+// MS-DOS time and date for ZIP entries: the slot's in-game save time, or the
+// current local time when the save has none. Like the save time, MS-DOS time
+// is a plain local date and time without a time zone.
+function dosDateTime(time, now = new Date()) {
+  const t = time?.valid ? time : {
+    year: now.getFullYear(), month: now.getMonth() + 1, day: now.getDate(),
+    hour: now.getHours(), minute: now.getMinutes(),
+  };
+  // MS-DOS time counts seconds in steps of two.
+  const halfSeconds = Math.floor((time?.valid ? time.second : now.getSeconds()) / 2);
+  return [(t.hour << 11) | (t.minute << 5) | halfSeconds, ((t.year - 1980) << 9) | (t.month << 5) | t.day];
+}
+
+function zip(entries, time, now) {
+  const [dosTime, dosDate] = dosDateTime(time, now);
   const records = [];
   const directory = [];
   let offset = 0;
@@ -737,7 +792,8 @@ function zip(entries) {
     const local = new DataView(new ArrayBuffer(30));
     local.setUint32(0, 0x04034B50, true);
     local.setUint16(4, 20, true);
-    local.setUint16(12, 0x21, true);
+    local.setUint16(10, dosTime, true);
+    local.setUint16(12, dosDate, true);
     local.setUint32(14, crc, true);
     local.setUint32(18, bytes.length, true);
     local.setUint32(22, bytes.length, true);
@@ -746,7 +802,8 @@ function zip(entries) {
     central.setUint32(0, 0x02014B50, true);
     central.setUint16(4, 20, true);
     central.setUint16(6, 20, true);
-    central.setUint16(14, 0x21, true);
+    central.setUint16(12, dosTime, true);
+    central.setUint16(14, dosDate, true);
     central.setUint32(16, crc, true);
     central.setUint32(20, bytes.length, true);
     central.setUint32(24, bytes.length, true);
@@ -805,6 +862,44 @@ function exportLayout(active, edits, date = new Date(), uuid = globalThis.crypto
     name: 'Ocarina-of-Time-' + (active.loose ? 'Save' : active.id) + '-Patch-' + timestamp + '_' + uuid,
     entries: edits.map(({ path, after }) => [timestamp + '/' + path, after]),
   };
+}
+
+// Save Back: added by aut0mat3d/Claude (2026), vibe-coded with Claude
+// (Anthropic); MIT License. Offered only by hosts that announce it (Linux).
+// Pairs each edited file with the opened file it replaces, by the path the
+// host reported when opening it.
+function saveBackEntries(active, backup, edits, manifest) {
+  const source = path => {
+    const name = path.split('/').pop();
+    const file = name === 'progress.sav' ? active.progress : name === 'caption.sav' ? active.caption
+      : name === 'option.sav' ? backup.option : name === 'manifest.json' ? backup.manifest : null;
+    if (!file?.webkitRelativePath) throw Error("No opened file to replace with " + path + '.');
+    return file.webkitRelativePath;
+  };
+  const entries = edits.map(({ path, after }) => [source(path), after]);
+  if (manifest) entries.push([source('manifest.json'), manifest]);
+  return entries;
+}
+
+// After Save Back, the written bytes are the new state of the opened files.
+function replaceOpenedFiles(backup, written) {
+  const byPath = new Map(written);
+  const swap = file => {
+    if (!file || !byPath.has(file.webkitRelativePath)) return file;
+    const bytes = byPath.get(file.webkitRelativePath);
+    const data = typeof bytes === 'string' ? utf8.encode(bytes) : bytes;
+    return {
+      webkitRelativePath: file.webkitRelativePath,
+      arrayBuffer: async () => data.slice().buffer,
+      text: async () => decode.decode(data),
+    };
+  };
+  for (const slot of backup.slots) {
+    slot.progress = swap(slot.progress);
+    slot.caption = swap(slot.caption);
+  }
+  backup.option = swap(backup.option);
+  backup.manifest = swap(backup.manifest);
 }
 
 function captionImage(save) {
@@ -886,6 +981,12 @@ function initialize() {
   const wallet = get('wallet');
   const preview = get('preview');
   const slotSelect = get('slot');
+  if (desktop.features.saveBack) {
+    // Hosts with Save Back make it the main action; the exports stay available.
+    get('save-back').hidden = false;
+    get('save-back').classList.add('primary');
+    get('export').classList.remove('primary');
+  }
   const voiceSelect = get('voice-language');
   const maxMagicSelect = get('max-magic');
   const catalog = JSON.parse(get('catalog').textContent);
@@ -1164,12 +1265,9 @@ function initialize() {
   function render() {
     const p = state.p;
     const c = state.c;
-    const pad = n => String(n).padStart(2, '0');
-    const date = pad(c.int(0xBD46F485)) + '.' + pad(c.int(0xDFD840D3)) + '.' + c.int(0x9811A3F7);
-    const time = pad(c.int(0x23F3D75E)) + ':' + pad(c.int(0x27853BF7));
     const rows = [
       ['Slot', active.id],
-      ["Saved", date + ' · ' + time + ' · ' + (c.int(0x25F03CAA) ? "autosave" : "manual save")],
+      ["Saved", formatSaveTime(saveTime(c))],
       ["Area", p.string(0x1D6189DA, 64)],
       ["Progress ID", p.string(0x874C7ED4, 64) || '—'],
       ["Rupees", state.rupees + ' / ' + state.w.limit],
@@ -1197,6 +1295,10 @@ function initialize() {
     get('patch-info').textContent = active.loose
       ? "Copy the files inside the UTC timestamp folder into a copy of your save folder. Exports contain replacement files, not a full backup."
       : "Copy the contents of the UTC timestamp folder into the files folder of a copy of your full backup. Copy manifest.json to the backup root when included. Exports contain replacement files, not a full backup.";
+    if (desktop.features.saveBack) {
+      get('patch-info').textContent += " Save Back writes the edits straight into the opened files. The files it replaces are first kept as a ZIP" +
+        (desktop.features.saveBack.backupFolder ? " in " + desktop.features.saveBack.backupFolder : '') + ".";
+    }
     get('main').hidden = false;
     document.documentElement.classList.remove('landing');
     desktop.setWorkspaceLoaded(true);
@@ -1259,18 +1361,32 @@ function initialize() {
       if (current === revision) showError(error);
     }
   }
-  function openBackupFiles(files) {
-    revision++;
+  // Reads the save time of every slot, labels the slot list with it and
+  // opens the most recently saved slot, which is the one the game continues.
+  async function openBackupFiles(files) {
+    const current = ++revision;
     get('main').hidden = true;
     get('slot-choice').hidden = true;
     try {
-      backup = findBackupFiles(files);
-      slotSelect.replaceChildren(...backup.slots.map(slot => new Option(slot.id, slot.id)));
-      slotSelect.value = backup.slots[0].id;
+      const found = findBackupFiles(files);
+      await Promise.all(found.slots.map(async slot => {
+        try {
+          slot.time = saveTime(readSave(new Uint8Array(await slot.caption.arrayBuffer()), 0x2A0));
+        } catch {
+          slot.time = null;
+        }
+      }));
+      if (current !== revision) return;
+      backup = found;
+      const newest = newestSlot(backup.slots);
+      slotSelect.replaceChildren(...backup.slots.map(slot => new Option(
+        slot.id + (slot.time ? ' · ' + formatSaveTime(slot.time) : '') +
+          (slot === newest && backup.slots.length > 1 ? ' · newest' : ''), slot.id)));
+      slotSelect.value = newest.id;
       get('slot-choice').hidden = backup.slots.length < 2;
-      return loadSlot(backup.slots[0]);
+      return loadSlot(newest);
     } catch (error) {
-      showError(error);
+      if (current === revision) showError(error);
     }
   }
   get('folder').addEventListener('click', async () => {
@@ -1312,9 +1428,12 @@ function initialize() {
     event.preventDefault();
     const button = get('export');
     const folderButton = get('export-folder');
+    const backButton = get('save-back');
     const toFolder = event.submitter === folderButton;
+    const toBackup = event.submitter === backButton;
     button.disabled = true;
     folderButton.disabled = true;
+    backButton.disabled = true;
     result.textContent = '';
     const current = revision;
     try {
@@ -1335,23 +1454,40 @@ function initialize() {
       }
       const { name, entries } = exportLayout(active, edits);
       let message = "Patch for " + active.id + " saved.";
+      let manifest;
       if (manifestSource) {
         try {
-          entries.push(['manifest.json', await patchManifest(manifestSource, edits)]);
+          manifest = await patchManifest(manifestSource, edits);
+          entries.push(['manifest.json', manifest]);
         } catch (error) {
           message += " Manifest skipped. " + error.message;
         }
       }
       if (current !== revision) return;
+      if (toBackup) {
+        // A full backup's manifest lists the hashes of its files; writing the
+        // files without it would leave the backup inconsistent.
+        if (manifestSource && !manifest) throw Error("The backup manifest could not be updated. Nothing was saved.");
+        const files = saveBackEntries(active, backup, edits, manifest);
+        const saved = await desktop.saveBack(files);
+        if (current !== revision) return;
+        replaceOpenedFiles(backup, files);
+        await loadSlot(active);
+        get('export-section').scrollIntoView({ block: 'start' });
+        result.textContent = "Saved " + active.id + " back to the opened files. The previous files are kept in " +
+          saved.backup + '.';
+        return;
+      }
       const saved = toFolder
         ? await desktop.saveFolder(name, entries)
-        : await desktop.savePatch(name + '.zip', zip(entries));
+        : await desktop.savePatch(name + '.zip', zip(entries, saveTime(state.c)));
       if (current === revision) result.textContent = saved ? message + ' ' + saved : "Save canceled.";
     } catch (error) {
       if (current === revision) result.textContent = error.message;
     } finally {
       button.disabled = false;
       folderButton.disabled = false;
+      backButton.disabled = false;
     }
   });
 }

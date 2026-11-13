@@ -1,0 +1,125 @@
+# linux.yml
+#
+# Tests the Linux host and builds it with linux/build.sh --appimage, then
+# publishes OOT-SW2SE-<version>-linux.pyz and
+# OOT-SW2SE-<version>-linux-x86_64.AppImage: as workflow artifacts on every
+# run (download them from the run's page in the Actions tab) and as assets of
+# each published GitHub release, next to the Windows and macOS zips. The .pyz
+# contains no compiled code, so it runs on every architecture; the AppImage
+# runs the same .pyz with the system's python3.
+#
+# appimagetool and the AppImage runtime are pinned to release files checked
+# against their SHA-256, so the build doesn't depend on appimagetool's
+# changing "continuous" downloads.
+#
+# Linux version by aut0mat3d/Claude, 2026: vibe-coded with Claude (Anthropic).
+# Released under the MIT License, like the rest of OOT SW2SE (see LICENSE).
+
+name: Linux build
+
+on:
+  push:
+    branches: [main]
+    # Only the files that go into the app or produce it.
+    paths:
+      - "linux/**"
+      - "editor.html"
+      - "editor.ico"
+      - "Program.cs"
+      - "LICENSE"
+      - ".github/workflows/linux.yml"
+  pull_request:
+    paths:
+      - "linux/**"
+      - "editor.html"
+      - "editor.ico"
+      - "Program.cs"
+      - "LICENSE"
+      - ".github/workflows/linux.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # Write access is used only by the release step to attach the files.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Test the host
+        run: |
+          python3 --version
+          python3 -m unittest discover -s linux/tests -v
+
+      - name: Get appimagetool and the AppImage runtime
+        env:
+          TOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          TOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+          RUNTIME_URL: https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64
+          RUNTIME_SHA256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+        run: |
+          tools="$RUNNER_TEMP/appimage"
+          mkdir -p "$tools"
+          curl -fsSL --retry 3 -o "$tools/appimagetool" "$TOOL_URL"
+          curl -fsSL --retry 3 -o "$tools/runtime" "$RUNTIME_URL"
+          printf '%s  %s\n' "$TOOL_SHA256" "$tools/appimagetool" "$RUNTIME_SHA256" "$tools/runtime" | sha256sum -c -
+          chmod 755 "$tools/appimagetool"
+
+      # appimagetool and the built AppImage unpack themselves to a temporary
+      # folder instead of mounting (APPIMAGE_EXTRACT_AND_RUN), so the build
+      # doesn't depend on FUSE being usable on the runner.
+      - name: Build the app
+        id: build
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          APPIMAGETOOL="$RUNNER_TEMP/appimage/appimagetool" APPIMAGE_RUNTIME="$RUNNER_TEMP/appimage/runtime" \
+            linux/build.sh --appimage
+          version="$(python3 -I linux/dist/oot-sw2se.pyz --version | awk '{print $NF}')"
+          appimage="linux/dist/OOT_SW2SE-$version-x86_64.AppImage"
+          reported="$("./$appimage" --version)"
+          if [[ "$reported" != "OOT SW2SE $version" ]]; then
+            echo "error: the AppImage reports '$reported'" >&2
+            exit 1
+          fi
+          # Name the files like the Windows and macOS release assets.
+          pyz="linux/dist/OOT-SW2SE-$version-linux.pyz"
+          release_appimage="linux/dist/OOT-SW2SE-$version-linux-x86_64.AppImage"
+          mv linux/dist/oot-sw2se.pyz "$pyz"
+          mv "$appimage" "$release_appimage"
+          echo "pyz=$pyz" >> "$GITHUB_OUTPUT"
+          echo "appimage=$release_appimage" >> "$GITHUB_OUTPUT"
+
+      # Upload each file as it is instead of wrapping it in a zip; with
+      # archive: false, each upload takes one file.
+      - name: Upload the .pyz as a workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.build.outputs.pyz }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Upload the AppImage as a workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.build.outputs.appimage }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Attach the app to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          PYZ: ${{ steps.build.outputs.pyz }}
+          APPIMAGE: ${{ steps.build.outputs.appimage }}
+        # --clobber replaces the assets when the run is re-run.
+        run: gh release upload "$TAG" "$PYZ" "$APPIMAGE" --clobber --repo "$GITHUB_REPOSITORY"
