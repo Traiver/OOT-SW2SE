@@ -6,6 +6,9 @@
 # Actions tab) and as an asset of each published GitHub release, next to the
 # Windows and macOS zips. The .pyz contains no compiled code, so one file
 # runs on every architecture.
+#
+# Linux version by aut0mat3d/Claude, 2026: vibe-coded with Claude (Anthropic).
+# Released under the MIT License, like the rest of OOT SW2SE (see LICENSE).
 
 name: Linux build
 

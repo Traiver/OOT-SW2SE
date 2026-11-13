@@ -1,6 +1,9 @@
 """Tests for the Linux host (linux/oot_sw2se.py) without real dialogs or browsers.
 
 Run from the repository root:  python3 -m unittest discover -s linux/tests -v
+
+Linux version by aut0mat3d/Claude, 2026: vibe-coded with Claude (Anthropic).
+Released under the MIT License, like the rest of OOT SW2SE (see ../../LICENSE).
 """
 from __future__ import annotations
 
@@ -13,6 +16,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import zipfile
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
@@ -490,6 +494,113 @@ class SettingsTests(TempDirTest):
         self.assertIn("Icon=oot-sw2se\n", entry)
         self.assertIn("StartupWMClass=vivaldi-127.0.0.1__oot-sw2se-Default\n", entry)
         self.assertIn("NoDisplay=true\n", entry)
+
+
+SAVE = b"\x04\x03\x02\x01"  # The header every .sav file starts with.
+
+
+class SaveBackTests(TempDirTest):
+    def setUp(self) -> None:
+        super().setUp()
+        self.saves = os.path.join(self.root, "hookshot", "5a3c9e1f0b7d2468")
+        for slot in ("slot_00", "slot_05"):
+            write(os.path.join(self.saves, slot, "progress.sav"), SAVE + b"progress " + slot.encode())
+            write(os.path.join(self.saves, slot, "caption.sav"), SAVE + b"caption " + slot.encode())
+        write(os.path.join(self.saves, "option.sav"), SAVE + b"option")
+        os.chmod(os.path.join(self.saves, "slot_05", "progress.sav"), 0o600)
+        self.settings = host.Settings([os.path.join(self.root, "config", "OOT-SW2SE")])
+        self.dialogs = FakeDialogs()
+        self.host = host.EditorHost(self.dialogs, self.settings)
+
+    def open(self, folder: str) -> list[str]:
+        self.dialogs.folder = folder
+        return paths(self.host.open_backup())
+
+    def save_back(self, files: dict[str, bytes]) -> dict:
+        return self.host.save_back({"files": [{"relativePath": path, "contents": base64.b64encode(data).decode()}
+                                              for path, data in files.items()]})
+
+    def backups(self) -> list[str]:
+        folder = os.path.join(self.root, "config", "OOT-SW2SE", "backups")
+        return sorted(os.listdir(folder)) if os.path.isdir(folder) else []
+
+    def test_replaces_the_opened_files_after_backing_them_up(self) -> None:
+        self.open(self.saves)
+        progress = os.path.join(self.saves, "slot_05", "progress.sav")
+        result = self.save_back({"Backup/files/slot_05/progress.sav": SAVE + b"edited",
+                                 "Backup/files/slot_05/caption.sav": SAVE + b"edited caption"})
+        with open(progress, "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"edited")
+        self.assertEqual(os.stat(progress).st_mode & 0o777, 0o600, "permissions are kept")
+        self.assertEqual(result["files"], [progress, os.path.join(self.saves, "slot_05", "caption.sav")])
+        [name] = self.backups()
+        self.assertRegex(name, r"^0400486024DEC000_slot05_[0-9]{6}_[0-9]{6}\.zip$")
+        self.assertEqual(result["backup"], os.path.join(self.root, "config", "OOT-SW2SE", "backups", name))
+        with zipfile.ZipFile(result["backup"]) as archive:
+            self.assertEqual(sorted(archive.namelist()),
+                             ["backup.json", "slot_05/caption.sav", "slot_05/progress.sav"])
+            self.assertEqual(archive.read("slot_05/progress.sav"), SAVE + b"progress slot_05")
+            info = json.loads(archive.read("backup.json"))
+        self.assertEqual(info["titleId"], "0400486024DEC000")
+        self.assertEqual(info["files"]["slot_05/progress.sav"], progress)
+        # The written files are the new baseline: saving again works and
+        # backs up the edited version.
+        self.save_back({"Backup/files/slot_05/progress.sav": SAVE + b"edited twice"})
+        self.assertEqual(len(self.backups()), 2)
+
+    def test_nothing_is_written_when_a_file_changed_on_disk(self) -> None:
+        self.open(self.saves)
+        progress = os.path.join(self.saves, "slot_05", "progress.sav")
+        write(progress, SAVE + b"saved by the emulator meanwhile")
+        with self.assertRaisesRegex(host.HostError, "changed since it was opened"):
+            self.save_back({"Backup/files/slot_05/caption.sav": SAVE + b"x",
+                            "Backup/files/slot_05/progress.sav": SAVE + b"x"})
+        with open(progress, "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"saved by the emulator meanwhile")
+        with open(os.path.join(self.saves, "slot_05", "caption.sav"), "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"caption slot_05", "no file was written")
+        self.assertEqual(self.backups(), [])
+
+    def test_only_opened_and_valid_files_are_accepted(self) -> None:
+        with self.assertRaisesRegex(host.HostError, "Open a backup first"):
+            self.save_back({"Backup/files/slot_05/progress.sav": SAVE})
+        self.open(os.path.join(self.saves, "slot_05"))  # a slot folder picked directly
+        for files in [{"Backup/files/slot_00/progress.sav": SAVE},  # not opened
+                      {"../progress.sav": SAVE},
+                      {"Backup/files/slot_05/progress.sav": b"garbage"},  # no save header
+                      {}]:
+            with self.assertRaises(host.HostError, msg=repr(files)):
+                self.save_back(files)
+        self.assertEqual(self.backups(), [])
+        self.save_back({"Backup/files/option.sav": SAVE + b"new option"})
+        with open(os.path.join(self.saves, "option.sav"), "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"new option", "option.sav next to the slot folder")
+
+    def test_loose_save_and_manifest_title(self) -> None:
+        loose = os.path.join(self.root, "My Save")
+        save_pair(loose)
+        write(os.path.join(loose, "progress.sav"), SAVE + b"loose")
+        self.open(loose)
+        result = self.save_back({"My Save/progress.sav": SAVE + b"loose edited"})
+        self.assertRegex(os.path.basename(result["backup"]), r"^0400486024DEC000_save_")
+        with zipfile.ZipFile(result["backup"]) as archive:
+            self.assertIn("My Save/progress.sav", archive.namelist())
+        backup = os.path.join(self.root, "Backup")
+        save_pair(os.path.join(backup, "files", "slot_02"))
+        write(os.path.join(backup, "files", "slot_02", "caption.sav"), SAVE + b"c")
+        write(os.path.join(backup, "manifest.json"), json.dumps({"titleId": "0100000000001234"}).encode())
+        self.open(backup)
+        result = self.save_back({"Backup/files/slot_02/caption.sav": SAVE + b"c2", "Backup/manifest.json": b"{}"})
+        self.assertRegex(os.path.basename(result["backup"]), r"^0100000000001234_slot02_")
+        with open(os.path.join(backup, "manifest.json"), "rb") as file:
+            self.assertEqual(file.read(), b"{}")
+
+    def test_page_announces_save_back(self) -> None:
+        page = host.build_page(host.resource("editor.html").decode(), "1.0.0",
+                               {"saveBack": {"backupFolder": "/x</script>"}}).decode()
+        self.assertIn('hostFeatures: {"saveBack": {"backupFolder": "/x\\u003c/script>"}}', page)
+        plain = host.build_page(host.resource("editor.html").decode(), "1.0.0").decode()
+        self.assertIn("hostFeatures: {},", plain)
 
 
 # A stand-in browser: loads the editor like a real one (launch URL, cookie,

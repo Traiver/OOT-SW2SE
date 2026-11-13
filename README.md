@@ -13,8 +13,29 @@ Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream 
 - Export replacement files as a ZIP or to a new patch folder on Windows, macOS and Linux. Export names include a UTC timestamp followed by a UUID; replacement files sit inside a folder named with that same UTC timestamp (`yyyyMMdd_HHmmss`). Exports contain only replacement files, not a complete backup.
 - Toggle progress flags and change the spoken dialogue language when `option.sav` is available.
 - Open the most recently saved slot automatically, list every slot with its in-game save time, and give exported ZIP entries the slot's save time. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
+- On Linux only: save edits straight back into the opened files, with an automatic backup of the replaced files, and more. See [Linux version](#linux-version).
+
+## Linux version
+
+[`linux/`](linux/) adds a Linux version. It shows the same, unchanged editor in a browser window and provides the native parts (file dialogs, file access) through a small Python host instead of WebView2 or WKWebView. See [`linux/README.md`](linux/README.md) for requirements, building and use.
+
+Besides everything the Windows and macOS versions do, the Linux version has some features of its own. They are rebuilt here only for Linux; the Windows and macOS hosts don't have them:
+
+| Linux-only feature | Summary | Details |
+| ------------------ | ------- | ------- |
+| **Save Back** | Writes the edits straight into the opened save files. The files it replaces are first stored in `~/.config/OOT-SW2SE/backups/<titleID>_slot<NN>_<YYMMDD>_<hhmmss>.zip`. Nothing is written if a file changed since it was opened. | [Save Back](linux/README.md#save-back) |
+| **Remembered folders** | The open and export dialogs start in the folders used last, also after a restart (`~/.config/OOT-SW2SE/settings.json`). | [Settings](linux/README.md#settings) |
+| **Remembered window** | The app window reopens with its last size, maximized state and, on X11, position. | [Browser window](linux/README.md#browser-window) |
+| **App window with its own icon** | With a Chromium-based browser, the editor runs as an app window with its own task bar icon; otherwise in a browser tab. | [Browser window](linux/README.md#browser-window) |
+| **Desktop integration** | `--install` adds the app to the application menu. | [Add it to the application menu](linux/README.md#add-it-to-the-application-menu) |
+
+Save Back is the only one that touches `editor.html`: a **Save Back** button, hidden unless the host announces the feature in `window.chrome.webview.hostFeatures.saveBack`, and two helper functions (`saveBackEntries`, `replaceOpenedFiles`). On Windows and macOS the button stays hidden, so nothing changes there. A Windows or macOS host could offer Save Back by announcing the feature and answering the `saveBack` request like [`linux/oot_sw2se.py`](linux/oot_sw2se.py) does.
+
+The Linux version, Save Back and the save-time features below were written by aut0mat3d/Claude in 2026, vibe-coded with Claude (Anthropic), and are released under the MIT License like the rest of the project.
 
 ## Save time: newest slot and ZIP timestamps
+
+*Added by aut0mat3d/Claude (2026), vibe-coded with Claude (Anthropic); MIT License. Shared by all platforms.*
 
 A backup holds up to six slots (`slot_00` … `slot_05`): autosaves and manual saves. When you continue in the game, it loads the most recently saved slot, which is often not `slot_00`. Before this change, the editor always opened `slot_00` first. Edits to that slot then had no visible effect in the game, because the game kept loading a newer slot. The exported ZIP also dated every file 1980-01-01 00:00, so you could not tell from the files which save a patch came from.
 
@@ -111,7 +132,9 @@ To go back to the previous behavior, open `backup.slots[0]` in `openBackupFiles`
 
 - Added a Linux version in `linux/`: a Python host (standard library only) that shows the unchanged editor in its own window of a Chromium-based browser when one is installed, otherwise in a new tab of the default web browser, and uses `kdialog` or `zenity` for file dialogs. `linux/build.sh` builds a single executable `.pyz` and optionally an AppImage. See [`linux/README.md`](linux/README.md).
 - The editor now opens the most recently saved slot, shows each slot's save time (to the second, from the newly identified seconds field in `caption.sav`) in the slot list, and dates ZIP entries with the slot's save time instead of 1980-01-01. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
-- Added regression tests for both features (`tests/editor.test.cjs`, `linux/tests/test_host.py`).
+- Linux only: **Save Back** writes edits into the opened files after backing up the replaced files to `~/.config/OOT-SW2SE/backups/`. The open and export folders and the app window's size and position are remembered, and `--install` adds a menu entry and a task bar icon for the app window. See [Linux version](#linux-version).
+- Added regression tests for these features (`tests/editor.test.cjs`, `linux/tests/test_host.py`).
+- Written by aut0mat3d/Claude, vibe-coded with Claude (Anthropic); MIT License.
 
 To apply a patch to a full backup, copy the contents of the timestamp folder into the backup's `files/` directory and copy `manifest.json` to the backup root when included. For a standalone save, copy the files inside the timestamp folder into the save folder. Work on a copy of the backup.
 

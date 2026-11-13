@@ -243,6 +243,7 @@ html.landing { overflow: hidden; }
   <section id="export-section">
     <h2>Save Patch</h2>
     <div class="controls">
+      <button id="save-back" type="submit" form="edit" hidden>Save Back</button>
       <button id="export" class="primary" type="submit" form="edit">Save Patch ZIP</button>
       <button id="export-folder" type="submit" form="edit">Export to Folder</button>
       <button id="reset" type="button">Reset All Edits</button>
@@ -324,11 +325,21 @@ const desktop = (() => {
     })) });
   }
 
+  // Save Back: write the edited files over the opened ones. Only hosts that
+  // announce it in hostFeatures offer it (currently the Linux host).
+  const features = host.hostFeatures || {};
+
+  function saveBack(entries) {
+    return send('saveBack', { files: entries.map(([path, bytes]) => ({
+      relativePath: path, contents: base64(typeof bytes === 'string' ? utf8.encode(bytes) : bytes),
+    })) });
+  }
+
   function setWorkspaceLoaded(loaded) {
     host.postMessage({ action: 'workspace', loaded });
   }
 
-  return { openBackup, savePatch, saveFolder, setWorkspaceLoaded };
+  return { openBackup, savePatch, saveFolder, saveBack, features, setWorkspaceLoaded };
 })();
 
 const HEX = (n, width = 8) => '0x' + n.toString(16).toUpperCase().padStart(width, '0');
@@ -466,6 +477,10 @@ function readSlot(progress, caption) {
   }));
   return { p, c, w, rupees, capacities, counts, bottles, vitals, legacyMagic };
 }
+
+// Save time, newest slot and ZIP timestamps: added by aut0mat3d/Claude (2026),
+// vibe-coded with Claude (Anthropic); MIT License like the rest of the editor.
+// See "Save time: newest slot and ZIP timestamps" in README.md.
 
 // The in-game save time from caption.sav: the local date and time of the
 // console (or emulator) when the slot was saved, to the second.
@@ -849,6 +864,44 @@ function exportLayout(active, edits, date = new Date(), uuid = globalThis.crypto
   };
 }
 
+// Save Back: added by aut0mat3d/Claude (2026), vibe-coded with Claude
+// (Anthropic); MIT License. Offered only by hosts that announce it (Linux).
+// Pairs each edited file with the opened file it replaces, by the path the
+// host reported when opening it.
+function saveBackEntries(active, backup, edits, manifest) {
+  const source = path => {
+    const name = path.split('/').pop();
+    const file = name === 'progress.sav' ? active.progress : name === 'caption.sav' ? active.caption
+      : name === 'option.sav' ? backup.option : name === 'manifest.json' ? backup.manifest : null;
+    if (!file?.webkitRelativePath) throw Error("No opened file to replace with " + path + '.');
+    return file.webkitRelativePath;
+  };
+  const entries = edits.map(({ path, after }) => [source(path), after]);
+  if (manifest) entries.push([source('manifest.json'), manifest]);
+  return entries;
+}
+
+// After Save Back, the written bytes are the new state of the opened files.
+function replaceOpenedFiles(backup, written) {
+  const byPath = new Map(written);
+  const swap = file => {
+    if (!file || !byPath.has(file.webkitRelativePath)) return file;
+    const bytes = byPath.get(file.webkitRelativePath);
+    const data = typeof bytes === 'string' ? utf8.encode(bytes) : bytes;
+    return {
+      webkitRelativePath: file.webkitRelativePath,
+      arrayBuffer: async () => data.slice().buffer,
+      text: async () => decode.decode(data),
+    };
+  };
+  for (const slot of backup.slots) {
+    slot.progress = swap(slot.progress);
+    slot.caption = swap(slot.caption);
+  }
+  backup.option = swap(backup.option);
+  backup.manifest = swap(backup.manifest);
+}
+
 function captionImage(save) {
   const offset = save.block(0x63696A32, 4);
   const size = save.u32(offset);
@@ -928,6 +981,12 @@ function initialize() {
   const wallet = get('wallet');
   const preview = get('preview');
   const slotSelect = get('slot');
+  if (desktop.features.saveBack) {
+    // Hosts with Save Back make it the main action; the exports stay available.
+    get('save-back').hidden = false;
+    get('save-back').classList.add('primary');
+    get('export').classList.remove('primary');
+  }
   const voiceSelect = get('voice-language');
   const maxMagicSelect = get('max-magic');
   const catalog = JSON.parse(get('catalog').textContent);
@@ -1236,6 +1295,10 @@ function initialize() {
     get('patch-info').textContent = active.loose
       ? "Copy the files inside the UTC timestamp folder into a copy of your save folder. Exports contain replacement files, not a full backup."
       : "Copy the contents of the UTC timestamp folder into the files folder of a copy of your full backup. Copy manifest.json to the backup root when included. Exports contain replacement files, not a full backup.";
+    if (desktop.features.saveBack) {
+      get('patch-info').textContent += " Save Back writes the edits straight into the opened files. The files it replaces are first kept as a ZIP" +
+        (desktop.features.saveBack.backupFolder ? " in " + desktop.features.saveBack.backupFolder : '') + ".";
+    }
     get('main').hidden = false;
     document.documentElement.classList.remove('landing');
     desktop.setWorkspaceLoaded(true);
@@ -1365,9 +1428,12 @@ function initialize() {
     event.preventDefault();
     const button = get('export');
     const folderButton = get('export-folder');
+    const backButton = get('save-back');
     const toFolder = event.submitter === folderButton;
+    const toBackup = event.submitter === backButton;
     button.disabled = true;
     folderButton.disabled = true;
+    backButton.disabled = true;
     result.textContent = '';
     const current = revision;
     try {
@@ -1388,14 +1454,30 @@ function initialize() {
       }
       const { name, entries } = exportLayout(active, edits);
       let message = "Patch for " + active.id + " saved.";
+      let manifest;
       if (manifestSource) {
         try {
-          entries.push(['manifest.json', await patchManifest(manifestSource, edits)]);
+          manifest = await patchManifest(manifestSource, edits);
+          entries.push(['manifest.json', manifest]);
         } catch (error) {
           message += " Manifest skipped. " + error.message;
         }
       }
       if (current !== revision) return;
+      if (toBackup) {
+        // A full backup's manifest lists the hashes of its files; writing the
+        // files without it would leave the backup inconsistent.
+        if (manifestSource && !manifest) throw Error("The backup manifest could not be updated. Nothing was saved.");
+        const files = saveBackEntries(active, backup, edits, manifest);
+        const saved = await desktop.saveBack(files);
+        if (current !== revision) return;
+        replaceOpenedFiles(backup, files);
+        await loadSlot(active);
+        get('export-section').scrollIntoView({ block: 'start' });
+        result.textContent = "Saved " + active.id + " back to the opened files. The previous files are kept in " +
+          saved.backup + '.';
+        return;
+      }
       const saved = toFolder
         ? await desktop.saveFolder(name, entries)
         : await desktop.savePatch(name + '.zip', zip(entries, saveTime(state.c)));
@@ -1405,6 +1487,7 @@ function initialize() {
     } finally {
       button.disabled = false;
       folderButton.disabled = false;
+      backButton.disabled = false;
     }
   });
 }

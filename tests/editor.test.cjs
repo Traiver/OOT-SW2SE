@@ -7,7 +7,7 @@ const catalog = JSON.parse(html.match(/<script id="catalog" type="application\/j
 const context = vm.createContext({ TextEncoder, TextDecoder, Blob, crypto: require('node:crypto').webcrypto,
   window: { chrome: { webview: { addEventListener() {}, postMessage() {} } } } });
 vm.runInContext(html.match(/<script>\s*('use strict';.*?)<\/script>/s)[1], context);
-const api = vm.runInContext('({readSlot, updateSlot, editOptions, removalIssue, acquisitionFlags, zip, exportLayout, saveTime, formatSaveTime, newestSlot})', context);
+const api = vm.runInContext('({readSlot, updateSlot, editOptions, removalIssue, acquisitionFlags, zip, exportLayout, saveTime, formatSaveTime, newestSlot, saveBackEntries, replaceOpenedFiles})', context);
 const editable = api.editOptions(catalog);
 const item = name => catalog.inventory.find(row => row[1] === name)[0];
 const registration = hash => catalog.registrations.find(([stocks]) => stocks.includes(hash));
@@ -145,6 +145,9 @@ test('ZIP and folder layout use one UTC timestamp before the UUID and instead of
   }
 });
 
+// Tests for the save time and Save Back additions by aut0mat3d/Claude (2026),
+// vibe-coded with Claude (Anthropic); MIT License.
+
 // Writes an in-game save time into a fixture's caption.sav.
 function setSaveTime(f, [year, month, day, hour, minute, second], auto = 1) {
   const view = new DataView(f.c.buffer);
@@ -204,6 +207,33 @@ test('ZIP entries carry the save time, or the current time when the save has non
   assert.deepEqual(await entryTimes(api.saveTime(f.slot().c)), [2026, 11, 13, 0, 12, 40], 'MS-DOS time has 2 s steps');
   const now = new Date(2026, 10, 14, 15, 30, 17);
   assert.deepEqual(await entryTimes(api.saveTime(fixture().slot().c), now), [2026, 11, 14, 15, 30, 16]);
+});
+
+test('Save Back pairs each edited file with the opened file it replaces', async () => {
+  const opened = path => ({ webkitRelativePath: path, arrayBuffer: async () => new ArrayBuffer(0) });
+  const active = { id: 'slot_05', progress: opened('Backup/files/slot_05/progress.sav'),
+    caption: opened('Backup/files/slot_05/caption.sav') };
+  const backup = { slots: [active, { id: 'slot_00', progress: opened('Backup/files/slot_00/progress.sav'),
+    caption: opened('Backup/files/slot_00/caption.sav') }],
+    option: opened('Backup/files/option.sav'), manifest: opened('Backup/manifest.json') };
+  const bytes = n => new Uint8Array([n]);
+  const edits = [{ path: 'slot_05/progress.sav', after: bytes(1) }, { path: 'slot_05/caption.sav', after: bytes(2) },
+    { path: 'option.sav', after: bytes(3) }];
+  const entries = api.saveBackEntries(active, backup, edits, bytes(4));
+  assert.deepEqual(entries.map(([path]) => path), ['Backup/files/slot_05/progress.sav',
+    'Backup/files/slot_05/caption.sav', 'Backup/files/option.sav', 'Backup/manifest.json']);
+  // Loose saves use their own paths.
+  const loose = { id: 'My Save', loose: true, progress: opened('My Save/progress.sav'), caption: opened('My Save/caption.sav') };
+  assert.deepEqual(api.saveBackEntries(loose, { slots: [loose] }, [{ path: 'progress.sav', after: bytes(1) }])
+    .map(([path]) => path), ['My Save/progress.sav']);
+  assert.throws(() => api.saveBackEntries(loose, { slots: [loose] }, [{ path: 'option.sav', after: bytes(1) }]),
+    /No opened file/);
+
+  api.replaceOpenedFiles(backup, entries);
+  assert.deepEqual([...new Uint8Array(await active.progress.arrayBuffer())], [1], 'the written bytes are the new state');
+  assert.deepEqual([...new Uint8Array(await backup.option.arrayBuffer())], [3]);
+  assert.equal(backup.slots[1].progress.webkitRelativePath, 'Backup/files/slot_00/progress.sav');
+  assert.deepEqual([...new Uint8Array(await backup.slots[1].progress.arrayBuffer())], [], 'other slots are untouched');
 });
 
 module.exports = { fixture };

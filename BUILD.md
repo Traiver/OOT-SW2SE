@@ -36,7 +36,7 @@ linux/build.sh
 
 The script places `linux/dist/oot-sw2se.pyz`, a single executable file that bundles `linux/oot_sw2se.py` with the same `editor.html` unchanged, the icon and the project license, in `linux/dist`. It reads the version from `Program.cs`. With `--appimage` and [appimagetool](https://github.com/AppImage/appimagetool) installed, it also builds an AppImage. At runtime, the app shows the editor in its own window of a Chromium-based browser when one is installed, otherwise in a new tab of the default web browser, and uses `kdialog` or `zenity` for file dialogs.
 
-GitHub Actions also runs this script ([`.github/workflows/linux.yml`](.github/workflows/linux.yml)) and attaches `OOT-SW2SE-<version>-linux.pyz` to releases. See [`linux/README.md`](linux/README.md) for usage notes, desktop integration and how the browser host works.
+GitHub Actions also runs this script ([`.github/workflows/linux.yml`](.github/workflows/linux.yml)) and attaches `OOT-SW2SE-<version>-linux.pyz` to releases. See [`linux/README.md`](linux/README.md) for usage notes, desktop integration and how the browser host works. The Linux version, including its Linux-only Save Back, was written by aut0mat3d/Claude, vibe-coded with Claude (Anthropic), under the MIT License.
 
 ## Checks
 

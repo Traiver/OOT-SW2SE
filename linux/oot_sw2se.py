@@ -16,6 +16,8 @@ of fetch() to this server, which implements the host actions the page uses:
   - "openBackup": pick a backup/save folder and return its files as base64
   - "savePatch":  receive the patch ZIP as base64 and save it with a dialog
   - "saveFolder": receive the patch files and write them to a new folder
+  - "saveBack":   Linux only; write the edited files over the opened ones
+                  after keeping the replaced files in a backup ZIP
   - "workspace":  resizes the native window on Windows/macOS; ignored here
 Folder and file dialogs are shown with kdialog or zenity, so they look native
 on KDE and GNOME. Size limits and folder rules mirror the other two hosts so
@@ -29,6 +31,9 @@ header (against DNS rebinding). The browser is opened with a one-time launch
 URL that sets an HttpOnly, SameSite=Strict session cookie. API requests need
 that cookie, the page's own Origin and a custom header, so neither other
 websites nor other local users can call the host.
+
+Linux version by aut0mat3d/Claude, 2026: vibe-coded with Claude (Anthropic).
+Released under the MIT License, like the rest of OOT SW2SE (see ../LICENSE).
 """
 from __future__ import annotations
 
@@ -36,6 +41,7 @@ import argparse
 import base64
 import binascii
 import contextlib
+import hashlib
 import hmac
 import http.cookies
 import http.server
@@ -55,6 +61,7 @@ import time
 import urllib.parse
 import uuid
 import webbrowser
+import zipfile
 
 APP_NAME = "OOT SW2SE"
 APP_ID = "oot-sw2se"
@@ -209,13 +216,19 @@ class BackupReader:
 
     def __init__(self) -> None:
         self.files: list[dict[str, str]] = []
+        # relativePath -> (absolute path, SHA-256 of the contents read)
+        self.sources: dict[str, tuple[str, str]] = {}
         self.total = 0
 
     @classmethod
-    def read(cls, folder: str) -> list[dict[str, str]]:
-        """Returns the files of `folder` as {relativePath, contents} entries."""
+    def read(cls, folder: str, sources: dict | None = None) -> list[dict[str, str]]:
+        """Returns the files of `folder` as {relativePath, contents} entries.
+        If `sources` is given, it receives where each file came from and the
+        SHA-256 of what was read, for Save Back."""
         reader = cls()
         reader._read(os.path.abspath(folder))
+        if sources is not None:
+            sources.update(reader.sources)
         return reader.files
 
     def _read(self, folder: str) -> None:
@@ -300,6 +313,7 @@ class BackupReader:
             raise changed
         self.total += len(data)
         self.files.append({"relativePath": relative_path, "contents": base64.b64encode(data).decode("ascii")})
+        self.sources[relative_path] = (path, hashlib.sha256(data).hexdigest())
 
 
 def slot_name(name: str) -> str | None:
@@ -422,7 +436,7 @@ def decode_patch_zip(contents: object) -> bytes:
     return data
 
 
-def write_file_atomically(path: str, data: bytes) -> None:
+def write_file_atomically(path: str, data: bytes, mode: int = 0o644) -> None:
     """Writes `data` to `path` through a temporary file in the same folder, so
     an existing file is only replaced once the new one is complete."""
     descriptor, temp = tempfile.mkstemp(prefix=".oot-patch-", suffix=".tmp", dir=os.path.dirname(path) or ".")
@@ -431,7 +445,7 @@ def write_file_atomically(path: str, data: bytes) -> None:
             file.write(data)
             file.flush()
             os.fsync(file.fileno())
-            os.fchmod(file.fileno(), 0o644)
+            os.fchmod(file.fileno(), mode)
         os.replace(temp, path)
         temp = ""
     finally:
@@ -563,6 +577,20 @@ class Settings:
                 self.values = data
                 break
 
+    def backup_folder(self, create: bool = True) -> str | None:
+        """The folder for Save Back's backups: backups/ next to settings.json,
+        in the first settings folder that can be created."""
+        for folder in self.folders:
+            backups = os.path.join(folder, "backups")
+            if not create:
+                return backups
+            try:
+                os.makedirs(backups, exist_ok=True)
+                return backups
+            except OSError:
+                continue
+        return None
+
     def folder(self, key: str) -> str | None:
         """A remembered folder, if it still exists."""
         value = self.values.get(key)
@@ -606,6 +634,95 @@ def remembered_window(previous: object, current: dict) -> dict:
     return current
 
 
+# MARK: - Save back (Linux only)
+
+# The title ID of the only game the editor supports; editor.html checks the
+# same ID in manifest.json. The save files themselves don't contain it.
+TITLE_ID = "0400486024DEC000"
+# Every .sav file starts with this header (see readSave in editor.html).
+SAVE_MAGIC = struct.pack("<I", 0x01020304)
+
+
+def backup_title_id(sources: dict[str, tuple[str, str]]) -> str:
+    """The title ID from the opened backup's manifest.json, or TITLE_ID."""
+    manifest = sources.get("Backup/manifest.json")
+    if manifest:
+        with contextlib.suppress(OSError, ValueError, AttributeError):
+            with open(manifest[0], encoding="utf-8") as file:
+                title = str(json.load(file).get("titleId", ""))
+            if re.fullmatch(r"[0-9A-Fa-f]{16}", title):
+                return title.upper()
+    return TITLE_ID
+
+
+def archive_name(relative_path: str) -> str:
+    """Name of an opened file inside a backup ZIP, relative to the save
+    folder: slot_05/progress.sav, option.sav, manifest.json, or
+    <folder>/progress.sav for a loose save."""
+    if relative_path.startswith(BACKUP_PREFIX):
+        return relative_path[len(BACKUP_PREFIX):]
+    if relative_path == "Backup/manifest.json":
+        return "manifest.json"
+    return relative_path
+
+
+def slot_label(relative_paths: list[str]) -> str:
+    """slot05 for files of slot_05, save for a loose save."""
+    for path in relative_paths:
+        match = re.search(r"(?:^|/)slot_0([0-5])/", path)
+        if match:
+            return "slot0" + match.group(1)
+    return "save"
+
+
+def read_current(path: str) -> tuple[bytes, os.stat_result]:
+    """Reads a file that is about to be replaced, with the usual limits."""
+    info = os.stat(path)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_BYTES:
+        raise HostError(f"{path} is not a save file the editor can replace.")
+    with open(path, "rb") as file:
+        return file.read(MAX_FILE_BYTES + 1), info
+
+
+def write_backup_archive(folder: str, sources: dict[str, tuple[str, str]],
+                         originals: dict[str, tuple[str, bytes, os.stat_result]]) -> str:
+    """Stores the files about to be replaced in a new ZIP in `folder`:
+    <titleID>_<slotNN|save>_<YYMMDD>_<hhmmss>.zip (local time), with each file's
+    original modification time and a backup.json that lists where the files
+    came from. Returns the ZIP's path."""
+    base = f"{backup_title_id(sources)}_{slot_label(list(originals))}_{time.strftime('%y%m%d_%H%M%S')}"
+    path = os.path.join(folder, base + ".zip")
+    number = 1
+    while os.path.lexists(path):
+        number += 1
+        path = os.path.join(folder, f"{base}_{number}.zip")
+    info = {
+        "titleId": backup_title_id(sources),
+        "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "createdBy": f"{APP_NAME} for Linux (Save Back)",
+        "files": {archive_name(relative): file for relative, (file, _, _) in originals.items()},
+    }
+    descriptor, temp = tempfile.mkstemp(prefix=".oot-backup-", suffix=".tmp", dir=folder)
+    try:
+        with os.fdopen(descriptor, "wb") as raw:
+            with zipfile.ZipFile(raw, "w", zipfile.ZIP_DEFLATED) as archive:
+                for relative, (_, data, file_info) in originals.items():
+                    stamp = time.localtime(max(file_info.st_mtime, 315532800))[:6]  # ZIP starts at 1980
+                    entry = zipfile.ZipInfo(archive_name(relative), date_time=stamp)
+                    entry.compress_type = zipfile.ZIP_DEFLATED
+                    archive.writestr(entry, data)
+                archive.writestr("backup.json", json.dumps(info, indent=2, ensure_ascii=False) + "\n")
+            raw.flush()
+            os.fsync(raw.fileno())
+        os.replace(temp, path)
+        temp = ""
+    finally:
+        if temp:
+            with contextlib.suppress(OSError):
+                os.unlink(temp)
+    return path
+
+
 # MARK: - Host actions
 
 class EditorHost:
@@ -619,6 +736,8 @@ class EditorHost:
         # Dialogs start in the folders used last, also from earlier runs.
         self.last_folder = settings.folder("lastBackupFolder") if settings else None
         self.last_export_folder = settings.folder("lastExportFolder") if settings else None
+        # Files of the opened backup, for Save Back: relativePath -> (path, SHA-256).
+        self.sources: dict[str, tuple[str, str]] = {}
 
     def handle(self, message: dict) -> dict:
         """Runs one request and returns {result, error} for the page."""
@@ -632,6 +751,8 @@ class EditorHost:
                 result = self.save_patch(message)
             elif action == "saveFolder":
                 result = self.save_folder(message)
+            elif action == "saveBack":
+                result = self.save_back(message)
             else:
                 raise HostError("Unknown editor action.")
             return {"result": result, "error": None}
@@ -650,7 +771,10 @@ class EditorHost:
             return None
         self.last_folder = folder
         self._remember(lastBackupFolder=folder)
-        return BackupReader.read(folder)
+        sources: dict[str, tuple[str, str]] = {}
+        files = BackupReader.read(folder, sources)
+        self.sources = sources
+        return files
 
     def save_patch(self, message: dict) -> str | None:
         data = decode_patch_zip(message.get("contents"))
@@ -678,6 +802,72 @@ class EditorHost:
         self.last_export_folder = parent
         self._remember(lastExportFolder=parent)
         return write_patch_folder(parent, files, name)  # type: ignore[arg-type]
+
+    def save_back(self, message: dict) -> dict:
+        """Replaces opened files with the edited ones (Linux only).
+
+        Only files that were read when the backup was opened can be written,
+        each back to where it came from, and only while it still holds what
+        was read: if the game or an emulator saved in the meantime, nothing
+        is written. The files about to be replaced are first stored in a ZIP
+        in the backups folder.
+        """
+        if not self.sources:
+            raise HostError("Open a backup first.")
+        entries = message.get("files")
+        if not isinstance(entries, list) or not 1 <= len(entries) <= 4:
+            raise HostError("Invalid save file list.")
+        new: dict[str, bytes] = {}
+        total = 0
+        for entry in entries:
+            path = entry.get("relativePath") if isinstance(entry, dict) else None
+            contents = entry.get("contents") if isinstance(entry, dict) else None
+            if not isinstance(path, str) or path not in self.sources or path in new or \
+                    not isinstance(contents, str) or not contents or len(contents) > 2 * MAX_FILE_BYTES:
+                raise HostError("Invalid save file.")
+            try:
+                data = base64.b64decode(contents, validate=True)
+            except (binascii.Error, ValueError):
+                raise HostError("Invalid save file.") from None
+            total += len(data)
+            if not data or len(data) > MAX_FILE_BYTES or total > MAX_BACKUP_BYTES:
+                raise HostError("The save files are too large.")
+            if path.endswith(".sav") and not data.startswith(SAVE_MAGIC):
+                raise HostError(f"{path} is not a valid save file.")
+            if path.endswith(".json"):
+                try:
+                    json.loads(data)
+                except ValueError:
+                    raise HostError(f"{path} is not valid JSON.") from None
+            new[path] = data
+
+        originals: dict[str, tuple[str, bytes, os.stat_result]] = {}
+        for path in new:
+            file, digest = self.sources[path]
+            try:
+                current, info = read_current(file)
+            except OSError as error:
+                raise HostError(f"{file} could not be read: {describe_os_error(error)}. Nothing was saved.") from error
+            if hashlib.sha256(current).hexdigest() != digest:
+                raise HostError(f"{archive_name(path)} changed since it was opened (did the game or emulator save?). "
+                                "Nothing was saved. Close the game, open the backup again and repeat the edits.")
+            originals[path] = (file, current, info)
+
+        folder = self.settings.backup_folder() if self.settings else None
+        if folder is None:
+            raise HostError("No folder for backups could be created. Nothing was saved.")
+        archive = write_backup_archive(folder, self.sources, originals)
+        written = []
+        for path, data in new.items():
+            file, _, info = originals[path]
+            try:
+                write_file_atomically(file, data, stat.S_IMODE(info.st_mode))
+            except OSError as error:
+                raise HostError(f"Saving {file} failed: {describe_os_error(error)}. The files as they were "
+                                f"before are kept in {archive}.") from error
+            self.sources[path] = (file, hashlib.sha256(data).hexdigest())
+            written.append(file)
+        return {"backup": archive, "files": written}
 
     def _export_start(self) -> str | None:
         return self.last_export_folder or self.last_folder
@@ -790,6 +980,8 @@ BRIDGE_SHIM = r"""
   });
   window.chrome = window.chrome || {};
   window.chrome.webview = {
+    // Extras of this host that the Windows and macOS hosts don't have.
+    hostFeatures: __HOST_FEATURES__,
     postMessage(message) {
       // "workspace" resizes the native window on Windows and macOS. A browser
       // tab keeps its size, and the page lays itself out for any size.
@@ -831,7 +1023,7 @@ BRIDGE_SHIM = r"""
 CSP_META = re.compile(r'<meta http-equiv="Content-Security-Policy" content="([^"]*)">')
 
 
-def build_page(html: str, version: str) -> bytes:
+def build_page(html: str, version: str, features: dict | None = None) -> bytes:
     """Prepares editor.html for the browser.
 
     The page itself is unchanged except for three things: the version
@@ -847,7 +1039,9 @@ def build_page(html: str, version: str) -> bytes:
     meta = f'<meta http-equiv="Content-Security-Policy" content="{policy}">'
     if "</script" in BRIDGE_SHIM:
         raise AssertionError("The bridge shim must not close its script element.")
-    html = CSP_META.sub(lambda _: meta + "\n<script>" + BRIDGE_SHIM + "</script>", html, count=1)
+    # "<" is escaped so no value can end the script element early.
+    shim = BRIDGE_SHIM.replace("__HOST_FEATURES__", json.dumps(features or {}).replace("<", "\\u003c"))
+    html = CSP_META.sub(lambda _: meta + "\n<script>" + shim + "</script>", html, count=1)
     return html.replace("{{EDITOR_VERSION}}", version).encode("utf-8")
 
 
@@ -1276,12 +1470,13 @@ def main(argv: list[str] | None = None) -> int:
             return install()
         if args.uninstall:
             return uninstall()
-        page = build_page(resource("editor.html").decode("utf-8"), editor_version())
+        settings = Settings()
+        features = {"saveBack": {"backupFolder": settings.backup_folder(create=False)}}
+        page = build_page(resource("editor.html").decode("utf-8"), editor_version(), features)
     except HostError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 
-    settings = Settings()
     lifetime = Lifetime(time.monotonic(), launch_timeout=None if args.no_browser else 120.0)
     server = EditorServer(EditorHost(Dialogs(), settings), lifetime, page, verbose=args.verbose)
     thread = threading.Thread(target=server.serve_forever, name="http", daemon=True)

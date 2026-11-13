@@ -8,6 +8,29 @@ the editor in an installed web browser and shows native folder and save
 dialogs. With a Chromium-based browser, the editor gets its own app window;
 otherwise it opens in a new tab of your default browser.
 
+> The Linux version was written by aut0mat3d/Claude in 2026, vibe-coded with
+> Claude (Anthropic). It is released under the MIT License, like the rest of
+> the project. See [Credits and license](#credits-and-license).
+
+## Linux-only features
+
+The Linux version can do everything the Windows and macOS versions can, plus
+the following. Each one is described below:
+
+| Feature | What it does | Windows and macOS |
+| ------- | ------------ | ----------------- |
+| [Save Back](#save-back) | Writes the edits straight into the opened save files, after keeping the files it replaces in a backup ZIP | Not available; patches are exported and copied by hand |
+| [Remembered folders](#settings) | The open and export dialogs start in the folders used last, also after a restart | Windows remembers the last folder until the app is closed |
+| [Remembered window](#browser-window) | The window reopens with its last size, maximized state and (on X11) position | Fixed start size |
+| [App window and task bar icon](#browser-window) | A Chromium-based browser shows the editor as an app with its own icon | Native window |
+| [Desktop integration](#add-it-to-the-application-menu) | `--install` adds the app to the application menu | None |
+
+All of them are part of the Linux host ([`oot_sw2se.py`](oot_sw2se.py)),
+except for Save Back. Save Back also needs a button and a few lines in
+[`editor.html`](../editor.html). That button only appears when the host
+announces the feature (`window.chrome.webview.hostFeatures.saveBack`), so the
+Windows and macOS versions are unchanged.
+
 ## Requirements
 
 - Python 3.8 or later. Most desktop distributions include it.
@@ -68,7 +91,9 @@ python3 linux/oot_sw2se.py
    - the `files` folder of a backup,
    - a single `slot_0X` folder,
    - any folder that holds `progress.sav` and `caption.sav`.
-3. Edit, then choose **Save Patch ZIP** or **Export to Folder**. Folder export
+3. Edit, then choose **Save Back** to write the edits into the opened files
+   (see [Save Back](#save-back)), or export a patch with **Save Patch ZIP** or
+   **Export to Folder**. Folder export
    creates a new `Ocarina-of-Time-…-Patch-<UTC timestamp>_<uuid>` folder in your
    selected location; ZIP exports use the same name with `.zip` appended.
    Both contain a UTC timestamp folder such as `20261109_094216/` instead of
@@ -83,6 +108,50 @@ page keeps it running, but discards unsaved edits.
 
 Close the game or emulator first: a save file that changes while it is being
 read is refused.
+
+### Save Back
+
+**Save Back** is the main button on Linux. It writes the edited files over the
+files you opened, so you don't have to copy a patch by hand. This is what
+happens when you click it:
+
+1. **Only opened files are written.** When a backup is opened, the editor
+   notes where each file came from and its SHA-256. Save Back can only replace
+   those files, each one at the place it was read from. This works the same
+   whether you opened the folder with all slots, a single `slot_0X` folder, a
+   backup with a `files/` folder, or a loose save.
+2. **Nothing is overwritten that changed in the meantime.** Each file must
+   still hold exactly what was read. If the game or an emulator saved since
+   then, Save Back stops and writes nothing. Close the game, open the backup
+   again and repeat the edits.
+3. **The files about to be replaced are backed up first.** They go into a new
+   ZIP in the `backups` folder next to the [settings](#settings), usually
+   `~/.config/OOT-SW2SE/backups/`:
+
+   ```text
+   <titleID>_slot<NN>_<YYMMDD>_<hhmmss>.zip   e.g. 0400486024DEC000_slot05_261113_110632.zip
+   <titleID>_save_<YYMMDD>_<hhmmss>.zip       for a loose save
+   ```
+
+   The time is the local time of the backup. The ZIP holds the replaced files
+   with their original modification times and folder layout (`slot_05/…`,
+   `option.sav`, `manifest.json`), plus `backup.json`, which lists the full
+   path each file came from. The save files don't contain a title ID. The
+   editor takes it from `manifest.json` when the backup has one, and otherwise
+   uses `0400486024DEC000`, the only game the editor supports.
+4. **Then the files are replaced,** each one atomically (written to a
+   temporary file next to it, then renamed) and with its permissions kept.
+   With a full backup, `manifest.json` is updated as well; if it can't be,
+   nothing is saved.
+5. **The editor reloads the slot** from the written files, so further edits
+   and another Save Back start from the saved state.
+
+To undo a Save Back, close the game and copy the files from the backup ZIP
+back to the paths listed in its `backup.json`. Backups are never deleted
+automatically; remove old ones from the `backups` folder when you no longer
+need them.
+
+**Save Patch ZIP** and **Export to Folder** work as on Windows and macOS.
 
 ### Add it to the application menu
 
@@ -172,12 +241,15 @@ Folders that no longer exist are ignored. The window size is only saved for
 the app window, not for a tab of a normal browser. Delete the file to reset
 everything; the editor works the same without it.
 
+[Save Back](#save-back) keeps its backup ZIPs in a `backups` folder next to
+`settings.json`. Deleting `settings.json` doesn't touch them.
+
 ## How it works
 
 The Windows and macOS hosts expose the WebView2 bridge
 (`window.chrome.webview`) to the page and answer three requests: open a
 backup, save a patch ZIP, write a patch folder. The Linux host does the same
-over HTTP:
+over HTTP, and adds one more:
 
 - It serves the editor from a server that listens only on `127.0.0.1`, on a
   random port.
@@ -194,6 +266,9 @@ over HTTP:
   host. Patches are validated and written like on the other platforms. ZIP
   files are written atomically, and patch folders never replace existing
   files or folders.
+- The added script also announces the Linux-only Save Back
+  (`hostFeatures.saveBack`), which shows its button in the editor. The host
+  answers a fourth request, `saveBack`, as described in [Save Back](#save-back).
 
 ## Tests
 
@@ -209,9 +284,16 @@ stand-in browser). They
 don't open real dialogs or a real browser, and they don't replace in-game
 testing with a real save.
 
-## License
+## Credits and license
 
-MIT, like the rest of the project: see [`LICENSE`](../LICENSE). The build
-places a copy inside the app (`LICENSE.txt`) and next to it in `dist`; keep
-it with the app when you share it. Game imagery shown by the editor keeps its
-own terms.
+The original editor is by [Traiver](https://github.com/Traiver/OOT-SW2SE) and
+upstream contributors. The Linux version (`linux/`,
+`.github/workflows/linux.yml`), Save Back, and the save-time features in
+`editor.html` were written by **aut0mat3d/Claude** in 2026. They were
+**vibe-coded with Claude** (Anthropic): Claude wrote the code and tests, and
+aut0mat3d directed the work and tested it on Linux with real emulator saves.
+
+Everything is released under the MIT License, like the rest of the project:
+see [`LICENSE`](../LICENSE). The build places a copy inside the app
+(`LICENSE.txt`) and next to it in `dist`; keep it with the app when you share
+it. Game imagery shown by the editor keeps its own terms.

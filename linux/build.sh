@@ -14,6 +14,9 @@
 # Files are assembled in .build first and only replace those in dist once
 # every step has succeeded, so a failed build keeps the last good one.
 
+# Linux version by aut0mat3d/Claude, 2026: vibe-coded with Claude (Anthropic).
+# Released under the MIT License, like the rest of OOT SW2SE (see ../LICENSE).
+
 set -euo pipefail
 
 # Resolve paths from this script's location, not the caller's directory.
