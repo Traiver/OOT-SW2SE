@@ -69,7 +69,16 @@ linux/build.sh --appimage    # or: APPIMAGETOOL=/path/to/appimagetool linux/buil
 
 This also writes `linux/dist/OOT_SW2SE-<version>-<arch>.AppImage`. It runs the
 same `.pyz` with the system's `python3`, so the requirements above still
-apply.
+apply. While building, `appimagetool` downloads the AppImage runtime from
+GitHub, so this step needs network access. Tested with `appimagetool`
+continuous build 370 on CachyOS (KDE Plasma 6.8, Wayland): the AppImage
+starts the editor in its app window and ends, unmounting itself, when the
+window is closed.
+
+The AppImage can't run `--install`. Integrate it with your desktop's AppImage
+tool instead. The app window then shows the browser's icon in the task bar,
+because the hidden entries that give it the editor's icon come from
+`--install` (see [Browser window](#browser-window)).
 
 You can also run the editor straight from a checkout, without building it:
 
