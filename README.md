@@ -109,7 +109,7 @@ To go back to the previous behavior, open `backup.slots[0]` in `openBackupFiles`
 
 2026-11-12 · 23:31 UTC
 
-- Added a Linux version in `linux/`: a Python host (standard library only) that opens the unchanged editor in the default web browser and uses `kdialog` or `zenity` for file dialogs. `linux/build.sh` builds a single executable `.pyz` and optionally an AppImage. See [`linux/README.md`](linux/README.md).
+- Added a Linux version in `linux/`: a Python host (standard library only) that shows the unchanged editor in its own window of a Chromium-based browser when one is installed, otherwise in a new tab of the default web browser, and uses `kdialog` or `zenity` for file dialogs. `linux/build.sh` builds a single executable `.pyz` and optionally an AppImage. See [`linux/README.md`](linux/README.md).
 - The editor now opens the most recently saved slot, shows each slot's save time (to the second, from the newly identified seconds field in `caption.sav`) in the slot list, and dates ZIP entries with the slot's save time instead of 1980-01-01. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
 - Added regression tests for both features (`tests/editor.test.cjs`, `linux/tests/test_host.py`).
 

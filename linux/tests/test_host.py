@@ -8,10 +8,12 @@ import base64
 import http.client
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import oot_sw2se as host  # noqa: E402
@@ -413,6 +415,148 @@ class ServerTests(TempDirTest):
                                 headers={"Content-Type": "text/plain;charset=UTF-8"})
         self.assertEqual(response.status, 204)
         self.assertEqual(self.lifetime._tabs, {})
+
+
+# A stand-in browser: loads the editor like a real one (launch URL, cookie,
+# page, heartbeat), logs its arguments, then stays FAKE_STAY seconds. With
+# FAKE_FAIL=<its name> it fails at once instead.
+FAKE_BROWSER = r'''#!{python}
+import http.cookiejar, os, sys, time, urllib.request
+name = os.path.basename(sys.argv[0])
+args = sys.argv[1:]
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write(name + " " + " ".join(args) + "\n")
+if os.environ.get("FAKE_FAIL") == name:
+    sys.exit(1)
+url = next((arg[len("--app="):] for arg in args if arg.startswith("--app=")), args[-1])
+opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+page = opener.open(url).read()
+origin = url.split("/launch/")[0]
+opener.open(urllib.request.Request(origin + "/api/alive", data=b'{{"tab": "fake"}}', headers={{
+    "Content-Type": "application/json", "X-OOT-SW2SE": "1", "Origin": origin}}))
+with open(os.environ["FAKE_LOG"], "a") as log:
+    log.write("loaded " + name + " " + str(b"window.chrome.webview" in page) + "\n")
+time.sleep(float(os.environ.get("FAKE_STAY", "1")))
+'''
+
+
+class AppWindowTests(TempDirTest):
+    def setUp(self) -> None:
+        super().setUp()
+        self.bin = os.path.join(self.root, "bin")
+        os.mkdir(self.bin)
+        self.log = os.path.join(self.root, "log")
+
+    def fake(self, *names: str) -> None:
+        for name in names:
+            path = os.path.join(self.bin, name)
+            with open(path, "w") as file:
+                file.write(FAKE_BROWSER.format(python=sys.executable))
+            os.chmod(path, 0o755)
+
+    def env(self, **extra: str) -> dict:
+        self.tmp = os.path.join(self.root, "tmp")
+        os.makedirs(self.tmp, exist_ok=True)
+        return {"PATH": self.bin, "HOME": self.root, "TMPDIR": self.tmp, "FAKE_LOG": self.log, **extra}
+
+    def read_log(self) -> list[str]:
+        try:
+            with open(self.log) as file:
+                return file.read().splitlines()
+        except FileNotFoundError:
+            return []
+
+    def test_finds_default_or_first_chromium_browser(self) -> None:
+        self.fake("brave", "chromium", "firefox")
+        with mock.patch.dict(os.environ, {"PATH": self.bin}, clear=True):
+            with mock.patch.object(host, "default_browser_id", return_value=None):
+                self.assertEqual(host.find_app_browser(), os.path.join(self.bin, "chromium"))
+            with mock.patch.object(host, "default_browser_id", return_value="brave-browser.desktop"):
+                self.assertEqual(host.find_app_browser(), os.path.join(self.bin, "brave"))
+            os.environ["OOT_SW2SE_APP_BROWSER"] = "none"
+            self.assertIsNone(host.find_app_browser())
+            os.environ["OOT_SW2SE_APP_BROWSER"] = "brave"
+            self.assertEqual(host.find_app_browser(), os.path.join(self.bin, "brave"))
+
+    def test_no_chromium_browser(self) -> None:
+        self.fake("firefox")
+        with mock.patch.dict(os.environ, {"PATH": self.bin}, clear=True), \
+                mock.patch.object(host, "default_browser_id", return_value="firefox.desktop"):
+            self.assertIsNone(host.find_app_browser())
+
+    def test_window_uses_and_removes_a_temporary_profile(self) -> None:
+        window = host.AppWindow("/usr/bin/chromium")
+        command = window.command("http://127.0.0.1:1/launch/x")
+        self.assertIn("--app=http://127.0.0.1:1/launch/x", command)
+        self.assertIn("--user-data-dir=" + window.profile, command)
+        self.assertIn("--password-store=basic", command)
+        self.assertTrue(os.path.isdir(window.profile))
+        window.close()
+        self.assertFalse(os.path.exists(window.profile))
+
+    def run_main(self, *args: str, **env: str) -> subprocess.Popen:
+        return subprocess.Popen([sys.executable, "-I", host.__file__, *args], env=self.env(**env),
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    def test_closing_the_app_window_ends_the_editor(self) -> None:
+        self.fake("chromium", "xdg-open")
+        process = self.run_main(FAKE_STAY="1")
+        output, _ = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, output)
+        self.assertIn("The editor window was closed.", output)
+        log = self.read_log()
+        self.assertTrue(log[0].startswith("chromium --app=http://127.0.0.1:"), log)
+        self.assertIn("loaded chromium True", log)
+        self.assertFalse([line for line in log if line.startswith("xdg-open")], "no tab was opened")
+        self.assertEqual(os.listdir(self.tmp), [], "the temporary profile was removed")
+
+    def test_failed_app_window_falls_back_to_a_tab(self) -> None:
+        self.fake("chromium", "xdg-open")
+        process = self.run_main(FAKE_FAIL="chromium", FAKE_STAY="0")
+        try:
+            for _ in range(200):
+                if any(line.startswith("loaded xdg-open") for line in self.read_log()):
+                    break
+                threading.Event().wait(0.1)
+        finally:
+            process.terminate()
+            output, _ = process.communicate(timeout=10)
+        log = self.read_log()
+        self.assertIn("loaded xdg-open True", log, output)
+        app_url = log[0].split("--app=")[1].split()[0]
+        tab_url = next(line for line in log if line.startswith("xdg-open ")).split()[1]
+        self.assertNotEqual(app_url, tab_url, "the tab gets a fresh launch URL")
+
+    def test_sigterm_closes_the_window_and_removes_the_profile(self) -> None:
+        self.fake("chromium")
+        process = self.run_main(FAKE_STAY="60")
+        try:
+            for _ in range(200):
+                if any(line.startswith("loaded chromium") for line in self.read_log()):
+                    break
+                threading.Event().wait(0.1)
+            self.assertEqual(len(os.listdir(self.tmp)), 1, "one temporary profile while the window is open")
+            process.terminate()
+            output, _ = process.communicate(timeout=15)
+        finally:
+            if process.poll() is None:
+                process.kill()
+        self.assertEqual(process.returncode, 0, output)
+        self.assertEqual(os.listdir(self.tmp), [], "the temporary profile was removed")
+
+    def test_tab_option_skips_the_app_window(self) -> None:
+        self.fake("chromium", "xdg-open")
+        process = self.run_main("--tab", FAKE_STAY="0")
+        try:
+            for _ in range(200):
+                if any(line.startswith("loaded") for line in self.read_log()):
+                    break
+                threading.Event().wait(0.1)
+        finally:
+            process.terminate()
+            process.communicate(timeout=10)
+        self.assertIn("loaded xdg-open True", self.read_log())
+        self.assertFalse([line for line in self.read_log() if line.startswith("chromium")])
 
 
 if __name__ == "__main__":

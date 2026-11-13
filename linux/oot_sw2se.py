@@ -5,7 +5,10 @@ All editor logic (UI, save parser, patch ZIP generator) lives in
 ../editor.html. The Windows host (../Program.cs) shows it in WebView2 and the
 macOS host (../macos/OOTSW2SE.swift) in WKWebView. This file is the Linux
 counterpart: instead of embedding a web view, it serves the same editor.html,
-unchanged, to the user's default browser from a private server on 127.0.0.1.
+unchanged, from a private server on 127.0.0.1 to a browser. When a
+Chromium-based browser is installed, the editor gets its own app window
+(--app, with a temporary profile); otherwise it opens in a new tab of the
+default browser.
 
 The page talks to its host through `window.chrome.webview` (the WebView2
 bridge). The served page gets a small shim that provides that object on top
@@ -18,8 +21,8 @@ Folder and file dialogs are shown with kdialog or zenity, so they look native
 on KDE and GNOME. Size limits and folder rules mirror the other two hosts so
 all of them accept the same backups and write the same patches.
 
-Only the Python 3 standard library is used. The server exits by itself a few
-seconds after the last editor tab is closed.
+Only the Python 3 standard library is used. The server exits by itself when
+the app window is closed, or a few seconds after the last editor tab is closed.
 
 Security model: the server listens on 127.0.0.1 only and checks the Host
 header (against DNS rebinding). The browser is opened with a one-time launch
@@ -41,6 +44,7 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import stat
 import struct
 import subprocess
@@ -619,6 +623,12 @@ class Lifetime:
         self.idle_timeout = idle_timeout
         self.close_grace = close_grace
 
+    @property
+    def started(self) -> bool:
+        """True once the editor page was served or a tab said hello."""
+        with self._lock:
+            return self._started
+
     def page_served(self, now: float) -> None:
         with self._lock:
             self._started = True
@@ -779,6 +789,12 @@ class EditorServer(http.server.ThreadingHTTPServer):
         self._launch_lock = threading.Lock()
         self._launch: str | None = secrets.token_urlsafe(32)
         self.launch_url = f"{self.origin}/launch/{self._launch}"
+
+    def new_launch_url(self) -> str:
+        """Replaces the launch token, e.g. when a second browser is tried."""
+        with self._launch_lock:
+            self._launch = secrets.token_urlsafe(32)
+            return f"{self.origin}/launch/{self._launch}"
 
     def consume_launch(self, token: str) -> bool:
         """True once for the launch token; it can't be used a second time."""
@@ -953,11 +969,106 @@ def _refresh_desktop_database(folder: str) -> None:
         subprocess.run([tool, "-q", folder], stdin=subprocess.DEVNULL, check=False)
 
 
-# MARK: - Main
+# MARK: - Browser
+
+# Chromium-based browsers that can show a page as an app window (--app):
+# (desktop file id, executable names). The default browser is preferred when
+# it is one of them; otherwise the first one installed is used.
+APP_BROWSERS = (
+    ("chromium.desktop", ("chromium", "chromium-browser")),
+    ("chromium-browser.desktop", ("chromium-browser", "chromium")),
+    ("google-chrome.desktop", ("google-chrome-stable", "google-chrome")),
+    ("brave-browser.desktop", ("brave-browser", "brave")),
+    ("microsoft-edge.desktop", ("microsoft-edge-stable", "microsoft-edge")),
+    ("vivaldi-stable.desktop", ("vivaldi-stable", "vivaldi")),
+)
+
+
+def default_browser_id() -> str | None:
+    """The desktop file id of the default browser, e.g. "chromium.desktop"."""
+    tool = shutil.which("xdg-settings")
+    if not tool:
+        return None
+    try:
+        output = subprocess.run([tool, "get", "default-web-browser"], stdin=subprocess.DEVNULL,
+                                capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return output or None
+
+
+def find_app_browser() -> str | None:
+    """Path of a Chromium-based browser for the app window, or None.
+
+    OOT_SW2SE_APP_BROWSER can name one explicitly (a path or command);
+    set it to "none" to always use a tab of the default browser.
+    """
+    forced = os.environ.get("OOT_SW2SE_APP_BROWSER", "").strip()
+    if forced:
+        return None if forced.lower() == "none" else shutil.which(forced)
+    default = default_browser_id()
+    ordered = sorted(APP_BROWSERS, key=lambda browser: browser[0] != default)
+    for _, names in ordered:
+        for name in names:
+            path = shutil.which(name)
+            if path:
+                return path
+    return None
+
+
+class AppWindow:
+    """The editor in its own window of a Chromium-based browser.
+
+    The browser runs with a temporary profile of its own, so it is a separate
+    process from any browser the user has open: the user's profile stays
+    untouched, and closing the window ends that process, which ends the
+    editor at once. The profile is deleted afterwards.
+    """
+
+    WIDTH, HEIGHT = 1100, 730  # The editor size of the Windows and macOS hosts.
+
+    def __init__(self, browser: str, verbose: bool = False) -> None:
+        self.browser = browser
+        self.verbose = verbose
+        self.profile = tempfile.mkdtemp(prefix="oot-sw2se-browser-")
+        self.process: subprocess.Popen | None = None
+
+    def command(self, url: str) -> list[str]:
+        return [self.browser, "--app=" + url, "--user-data-dir=" + self.profile,
+                f"--window-size={self.WIDTH},{self.HEIGHT}", "--class=" + APP_NAME,
+                "--no-first-run", "--no-default-browser-check", "--disable-sync",
+                # A new profile would otherwise ask KWallet or GNOME Keyring
+                # to unlock; the editor stores no passwords.
+                "--password-store=basic"]
+
+    def open(self, url: str) -> bool:
+        output = None if self.verbose else subprocess.DEVNULL
+        try:
+            self.process = subprocess.Popen(self.command(url), stdin=subprocess.DEVNULL, stdout=output,
+                                            stderr=output, start_new_session=True)
+            return True
+        except OSError:
+            return False
+
+    def returncode(self) -> int | None:
+        """The exit code once the browser has ended, else None."""
+        return self.process.poll() if self.process else 0
+
+    def close(self) -> None:
+        """Ends the browser if it still runs and deletes its profile."""
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(5)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        shutil.rmtree(self.profile, ignore_errors=True)
+
 
 def open_browser(url: str) -> bool:
-    """Opens `url` in the default browser without tying the browser's
-    lifetime or console output to this process."""
+    """Opens `url` in a new tab of the default browser without tying the
+    browser's lifetime or console output to this process."""
     opener = None if os.environ.get("BROWSER") else shutil.which("xdg-open")
     if opener:
         try:
@@ -969,16 +1080,21 @@ def open_browser(url: str) -> bool:
     return webbrowser.open(url)
 
 
+# MARK: - Main
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=APP_ID, description=f"{APP_NAME}: save editor for the Nintendo Switch 2 remake of Ocarina of Time. "
-                                 "Opens the editor in your default web browser.")
+                                 "Opens the editor in its own window of a Chromium-based browser when one is "
+                                 "installed, otherwise in a new tab of your default web browser.")
+    parser.add_argument("--tab", action="store_true",
+                        help="use a new tab of the default browser even if a Chromium-based browser is installed")
     parser.add_argument("--no-browser", action="store_true",
-                        help="print the editor URL instead of opening the default browser")
+                        help="print the editor URL instead of opening a browser")
     parser.add_argument("--install", action="store_true",
                         help="copy the app to ~/.local/bin and add it to the application menu")
     parser.add_argument("--uninstall", action="store_true", help="undo --install")
-    parser.add_argument("--verbose", action="store_true", help="log every HTTP request")
+    parser.add_argument("--verbose", action="store_true", help="log every HTTP request and the browser's output")
     parser.add_argument("--version", action="store_true", help="print the version and exit")
     args = parser.parse_args(argv)
 
@@ -1000,13 +1116,44 @@ def main(argv: list[str] | None = None) -> int:
     thread = threading.Thread(target=server.serve_forever, name="http", daemon=True)
     thread.start()
     print(f"{APP_NAME} is running. Open this address once, in your browser:\n  {server.launch_url}\n"
-          "It stops a few seconds after the editor tab is closed (or press Ctrl+C).", flush=True)
-    if not args.no_browser and not open_browser(server.launch_url):
-        print("No web browser could be started; open the address above yourself.", file=sys.stderr)
-        lifetime.launch_timeout = None
+          "It stops when the editor window or tab is closed (or press Ctrl+C).", flush=True)
+
+    # Logging out or closing the terminal sends SIGTERM or SIGHUP. Turn them
+    # into a normal exit, so the app window is closed and its temporary
+    # profile deleted below.
+    def stop(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(signum, stop)
+
+    window: AppWindow | None = None
+    windows: list[AppWindow] = []  # Every window started, to clean up at exit.
+    browser = None if args.no_browser or args.tab else find_app_browser()
+    if browser:
+        window = AppWindow(browser, verbose=args.verbose)
+        windows.append(window)
+        if window.open(server.launch_url):
+            print(f"Opening an app window with {browser}.", flush=True)
+        else:
+            window = None
+    if not args.no_browser and window is None:
+        tab_or_warn(server.launch_url, lifetime)
     try:
         while True:
-            time.sleep(1)
+            time.sleep(0.5)
+            if window is not None and window.returncode() is not None:
+                if lifetime.started:
+                    print("The editor window was closed. Exiting.", flush=True)
+                    break
+                if window.returncode() != 0:
+                    # The browser failed before showing the editor: use a tab.
+                    print(f"{window.browser} could not open the editor; using the default browser.", flush=True)
+                    window.close()
+                    tab_or_warn(server.new_launch_url(), lifetime)
+                # A zero exit code without the page means a launcher handed
+                # the window over to another process; the heartbeats tell
+                # when it is closed.
+                window = None
             reason = lifetime.exit_reason(time.monotonic())
             if reason:
                 print(reason + " Exiting.", flush=True)
@@ -1014,9 +1161,18 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        for started in windows:
+            started.close()
         server.shutdown()
         server.server_close()
     return 0
+
+
+def tab_or_warn(url: str, lifetime: Lifetime) -> None:
+    """Opens `url` in a tab of the default browser, or explains what to do."""
+    if not open_browser(url):
+        print(f"No web browser could be started; open this address yourself:\n  {url}", file=sys.stderr)
+        lifetime.launch_timeout = None
 
 
 if __name__ == "__main__":

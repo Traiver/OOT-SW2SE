@@ -3,9 +3,10 @@
 The OOT SW2SE save editor for Linux. It shows the same
 [`editor.html`](../editor.html) as the Windows and macOS versions, unchanged,
 so the editor itself behaves identically. Only the host differs
-([`oot_sw2se.py`](oot_sw2se.py)): instead of embedding a web view, it opens
-the editor in your default web browser and shows native folder and save
-dialogs.
+([`oot_sw2se.py`](oot_sw2se.py)): instead of embedding a web view, it shows
+the editor in an installed web browser and shows native folder and save
+dialogs. With a Chromium-based browser, the editor gets its own app window;
+otherwise it opens in a new tab of your default browser.
 
 ## Requirements
 
@@ -15,7 +16,10 @@ dialogs.
   and LXQt, and `zenity` everywhere else, falling back to whichever is
   installed. Set `OOT_SW2SE_DIALOG=kdialog` or `OOT_SW2SE_DIALOG=zenity` to
   choose one.
-- A current web browser (Firefox, Chromium, Chrome, …).
+- A current web browser. With a Chromium-based browser (Chromium, Google
+  Chrome, Brave, Microsoft Edge or Vivaldi) the editor runs in its own window,
+  like a regular app. Any other browser, such as Firefox, works too; the
+  editor then opens in a new tab. See [Browser window](#browser-window).
 
 The host uses only the Python standard library, so you don't need to install
 anything with pip.
@@ -53,9 +57,10 @@ python3 linux/oot_sw2se.py
 ## Use
 
 1. Start `oot-sw2se.pyz` by double-clicking it or running
-   `linux/dist/oot-sw2se.pyz` in a terminal. The editor opens in a new browser
-   tab. A downloaded copy first needs `chmod +x oot-sw2se.pyz`, or start it
-   with `python3 oot-sw2se.pyz`.
+   `linux/dist/oot-sw2se.pyz` in a terminal. The editor opens in its own
+   window, or in a new browser tab (see [Browser window](#browser-window)). A
+   downloaded copy first needs `chmod +x oot-sw2se.pyz`, or start it with
+   `python3 oot-sw2se.pyz`.
 2. Click **Open Backup** and pick one of:
    - a backup folder (with `files/slot_00` … or `slot_00` … inside),
    - the `files` folder of a backup,
@@ -70,8 +75,9 @@ python3 linux/oot_sw2se.py
    For a standalone save, copy the files inside the timestamp folder into the
    save folder. The patch contains only edited files, not a complete backup.
 
-Closing the browser tab ends the editor: the helper program exits about ten
-seconds later. Reloading the tab keeps it running, but discards unsaved edits.
+Closing the editor window ends the editor at once. In a browser tab, the
+helper program exits about ten seconds after the tab is closed. Reloading the
+page keeps it running, but discards unsaved edits.
 
 Close the game or emulator first: a save file that changes while it is being
 read is refused.
@@ -89,16 +95,45 @@ AppImageLauncher) instead.
 
 ### Options
 
-| Option         | Effect                                                         |
-| -------------- | -------------------------------------------------------------- |
-| `--no-browser` | Print the editor address instead of opening the default browser |
-| `--install`    | Add the app to `~/.local/bin` and the application menu          |
-| `--uninstall`  | Undo `--install`                                               |
-| `--verbose`    | Log every HTTP request                                         |
-| `--version`    | Print the version                                              |
+| Option         | Effect                                                              |
+| -------------- | ------------------------------------------------------------------- |
+| `--tab`        | Open a tab of the default browser even if a Chromium-based browser is installed |
+| `--no-browser` | Print the editor address instead of opening a browser               |
+| `--install`    | Add the app to `~/.local/bin` and the application menu              |
+| `--uninstall`  | Undo `--install`                                                    |
+| `--verbose`    | Log every HTTP request and the browser's output                     |
+| `--version`    | Print the version                                                   |
 
-To use a browser other than the default one, start with `--no-browser` and
-open the printed address there, or set the `BROWSER` environment variable.
+| Environment variable              | Effect                                                     |
+| --------------------------------- | ---------------------------------------------------------- |
+| `OOT_SW2SE_APP_BROWSER=<command>` | Use this Chromium-based browser for the window             |
+| `OOT_SW2SE_APP_BROWSER=none`      | Never open a window; always use a tab (like `--tab`)       |
+| `BROWSER=<command>`               | Browser for the tab, instead of the default browser        |
+| `OOT_SW2SE_DIALOG=kdialog\|zenity` | File dialog program                                       |
+
+To use any other browser, start with `--no-browser` and open the printed
+address there.
+
+### Browser window
+
+When a Chromium-based browser is installed, the editor opens in a window of
+its own, without tabs or an address bar, at the same size as on Windows and
+macOS. The default browser is used when it is Chromium-based; otherwise the
+first one found of `chromium`, `google-chrome-stable`, `brave-browser`,
+`microsoft-edge-stable` and `vivaldi-stable` (and their usual alternative
+names).
+
+The window runs with a fresh, temporary browser profile, so it is a separate
+process from any browser you have open. Your own browser profile, history and
+extensions are not touched, and no password-store prompt (KWallet, GNOME
+Keyring) appears. Closing the window ends the editor right away, and the
+temporary profile is deleted. It is also deleted when the editor is ended with
+Ctrl+C, by logging out or by closing its terminal.
+
+If no Chromium-based browser is found, or it fails to start, the editor opens
+in a new tab of your default browser instead. Browsers installed only as
+Flatpak or Snap are not detected; set `OOT_SW2SE_APP_BROWSER` to their
+launcher command if they accept Chromium's `--app` option, or use the tab.
 
 ## How it works
 
@@ -131,9 +166,10 @@ python3 -m unittest discover -s linux/tests -v
 
 These tests cover backup reading, patch validation and writing (the same
 cases `tests/host_exports.py` runs against the Windows and macOS hosts), page
-preparation, the server's access checks and the editor's lifetime. They don't
-open real dialogs or a browser, and they don't replace in-game testing with a
-real save.
+preparation, the server's access checks, the editor's lifetime, and choosing,
+starting and cleaning up the browser window (with a stand-in browser). They
+don't open real dialogs or a real browser, and they don't replace in-game
+testing with a real save.
 
 ## License
 
