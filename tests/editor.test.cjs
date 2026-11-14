@@ -236,4 +236,18 @@ test('Save Back pairs each edited file with the opened file it replaces', async 
   assert.deepEqual([...new Uint8Array(await backup.slots[1].progress.arrayBuffer())], [], 'other slots are untouched');
 });
 
+test('swim depth writes the float a save already carries, and leaves it alone when not given', () => {
+  const f = fixture();
+  const depth = catalog.fields.find(([, , name]) => name === 'PlayerStatus.DiveDepth')[0];
+  f.set(depth, 0x40C00000);                       // 6.0f, the Silver Scale value
+  const before = f.slot();
+  const after = edit(f, { swimDepth: 9 });
+  assert.equal(after.p.view.getFloat32(after.p.at(depth), true), 9);
+  assert.deepEqual(changedHashes(before.p, after.p), [depth]);
+  const untouched = edit(f, {});
+  assert.equal(untouched.p.view.getFloat32(untouched.p.at(depth), true), 6);
+  assert.throws(() => edit(f, { swimDepth: 41 }), /between 0 and 40/);
+  assert.throws(() => edit(f, { swimDepth: Number.NaN }), /between 0 and 40/);
+});
+
 module.exports = { fixture };

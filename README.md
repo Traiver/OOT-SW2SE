@@ -6,7 +6,7 @@ Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream 
 
 ![OOT SW2SE showing the stats of a loaded save](editor-screenshot.jpg)
 
-- Edit rupees, hearts, magic & more.
+- Edit rupees, hearts, magic, the swim depth & more.
 - Change item quantities, bottles, small keys, and bag or quiver capacity.
 - Add missing items, including masks, with their acquisition flags set automatically.
 - Remove supported owned single items, optionally clearing their mapped acquisition flags. Acquisition history is kept by default; story and quest progress are not reset. Unequip weapons and shields in both eras first. Default clothes, quantities, and capacity upgrades use their own controls rather than inventory removal.
