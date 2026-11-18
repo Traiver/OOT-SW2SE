@@ -130,6 +130,16 @@ html.landing { overflow: hidden; }
 .landing .intro { margin: 0; font-size: .9rem; }
 .landing .entry { margin: 12px 0 8px; }
 .landing #status { font-size: .78rem; overflow-wrap: anywhere; }
+#slot-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 140px), 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+.slot-card { display: grid; gap: 3px; align-content: start; padding: 8px; text-align: left; font-size: .84rem; }
+.slot-card img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 6px; }
+.slot-card .muted { font-size: .78rem; }
+.slot-card[aria-pressed="true"] { border-color: var(--gold); background: #253a30; }
 @media (max-height: 240px) {
   .landing header { padding: 11px 13px; }
   .landing .brand .gem { height: 28px; }
@@ -153,6 +163,7 @@ html.landing { overflow: hidden; }
   </div>
   </div>
   <p id="status" class="muted" role="status" aria-live="polite">Requires <code>progress.sav</code> and <code>caption.sav</code>.</p>
+  <div id="slot-cards" role="group" aria-label="Save slots" hidden></div>
 </header>
 <main id="main" hidden>
   <nav aria-label="Editor sections"><button type="button" data-jump="overview-section">Overview</button><button type="button" data-jump="edit-section">Stats</button><button type="button" data-jump="inventory-section">Inventory</button><button type="button" data-jump="flags-section">Progress</button><button type="button" data-jump="export-section">Export</button></nav>
@@ -513,6 +524,29 @@ function formatSaveTime(t) {
 function newestSlot(slots) {
   const key = t => t?.valid ? Date.UTC(t.year, t.month - 1, t.day, t.hour, t.minute, t.second) : -Infinity;
   return slots.reduce((best, slot) => key(slot.time) > key(best.time) ? slot : best, slots[0]);
+}
+
+// Slot cards: what each slot of a backup holds, so the right one can be
+// picked at a glance. Everything but the area and the dungeon rewards comes
+// from caption.sav, the small file the game shows on its own load screen.
+// Parts that can't be read are left out.
+function slotSummary(progress, caption, catalog) {
+  const summary = { time: null };
+  try {
+    const c = readSave(caption, 0x2A0);
+    summary.time = saveTime(c);
+    summary.hearts = c.int(0x1E55ECC5) / 4;
+    summary.maxHearts = c.int(0x74BD05D0) / 4;
+    summary.rupees = c.int(key.previewRupees);
+    summary.image = captionImage(c);
+  } catch { /* shown without the caption's details */ }
+  try {
+    const p = readSave(progress, 0x175D8);
+    summary.area = p.string(0x1D6189DA, 64) || undefined;
+    summary.rewards = catalog.inventory.filter(([hash, name]) =>
+      /^Item_(Stone|Medal)_/.test(name) && p.fields.has(hash) && p.int(hash) > 0).length;
+  } catch { /* shown without the area and rewards */ }
+  return summary;
 }
 
 function readOptions(bytes) {
@@ -1040,6 +1074,7 @@ function initialize() {
   let state;
   let backup;
   let active;
+  let cardUrls = [];
   let options;
   let manifestSource;
   let selectedFields = [];
@@ -1345,6 +1380,7 @@ function initialize() {
         (desktop.features.saveBack.backupFolder ? " in " + desktop.features.saveBack.backupFolder : '') + ".";
     }
     get('main').hidden = false;
+    get('slot-cards').hidden = backup.slots.length < 2;
     document.documentElement.classList.remove('landing');
     desktop.setWorkspaceLoaded(true);
   }
@@ -1396,6 +1432,7 @@ function initialize() {
       if (parsed.rupees !== parsed.c.int(key.previewRupees)) message += " Exporting synchronizes the preview rupee count.";
       if (current !== revision) return;
       active = slot;
+      markActiveCard();
       state = parsed;
       options = parsedOptions;
       manifestSource = manifest;
@@ -1406,20 +1443,63 @@ function initialize() {
       if (current === revision) showError(error);
     }
   }
+  function showSlotCards(newest) {
+    cardUrls.forEach(url => URL.revokeObjectURL(url));
+    cardUrls = [];
+    get('slot-cards').replaceChildren(...backup.slots.map(slot => {
+      const { summary } = slot;
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'slot-card';
+      card.dataset.slot = slot.id;
+      card.setAttribute('aria-pressed', 'false');
+      if (summary.image) {
+        const url = URL.createObjectURL(summary.image);
+        cardUrls.push(url);
+        const image = document.createElement('img');
+        image.src = url;
+        image.alt = '';
+        card.append(image);
+      }
+      const details = [
+        summary.hearts !== undefined && "Hearts " + summary.hearts + " / " + summary.maxHearts,
+        summary.rupees !== undefined && summary.rupees + " rupees",
+        summary.rewards !== undefined && summary.rewards + " of 9 dungeon rewards",
+      ].filter(Boolean);
+      card.append(element('strong', slot.id + (slot === newest ? " · newest" : '')),
+        element('span', summary.time?.valid ? formatSaveTime(summary.time) : "Save time unknown"));
+      for (const text of [summary.area, details.join(' · ')].filter(Boolean)) {
+        const line = element('span', text);
+        line.className = 'muted';
+        card.append(line);
+      }
+      card.addEventListener('click', () => {
+        if (slot === active && !get('main').hidden) return;
+        slotSelect.value = slot.id;
+        return loadSlot(slot);
+      });
+      return card;
+    }));
+  }
+  function markActiveCard() {
+    for (const card of get('slot-cards').children) {
+      card.setAttribute('aria-pressed', String(card.dataset.slot === active?.id));
+    }
+  }
   // Reads the save time of every slot, labels the slot list with it and
   // opens the most recently saved slot, which is the one the game continues.
   async function openBackupFiles(files) {
     const current = ++revision;
     get('main').hidden = true;
     get('slot-choice').hidden = true;
+    get('slot-cards').hidden = true;
     try {
       const found = findBackupFiles(files);
       await Promise.all(found.slots.map(async slot => {
-        try {
-          slot.time = saveTime(readSave(new Uint8Array(await slot.caption.arrayBuffer()), 0x2A0));
-        } catch {
-          slot.time = null;
-        }
+        const read = file => file.arrayBuffer().then(buffer => new Uint8Array(buffer), () => new Uint8Array());
+        const [progress, caption] = await Promise.all([read(slot.progress), read(slot.caption)]);
+        slot.summary = slotSummary(progress, caption, catalog);
+        slot.time = slot.summary.time;
       }));
       if (current !== revision) return;
       backup = found;
@@ -1429,6 +1509,7 @@ function initialize() {
           (slot === newest && backup.slots.length > 1 ? ' · newest' : ''), slot.id)));
       slotSelect.value = newest.id;
       get('slot-choice').hidden = backup.slots.length < 2;
+      showSlotCards(newest);
       return loadSlot(newest);
     } catch (error) {
       if (current === revision) showError(error);

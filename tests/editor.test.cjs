@@ -242,6 +242,28 @@ test('the newest slot is chosen by in-game save time; ties keep the lower slot',
   assert.equal(api.newestSlot([at('slot_00', 2026, 3, 11, 9, 0, 0), at('slot_01', 2026, 11, 3, 9, 0, 0)]).id, 'slot_01');
 });
 
+test('slot cards summarize each slot from caption.sav, with the area and dungeon rewards from progress.sav', () => {
+  const { slotSummary } = vm.runInContext('({ slotSummary })', context);
+  const f = fixture(['Item_Stone_Forest', 'Item_Medal_Fire', 'Item_Boomerang']);
+  f.string(0x1D6189DA, 'KokiriForest');
+  const caption = new DataView(f.c.buffer);
+  const setCaption = (hash, value) => {
+    for (let o = 40; o < 0x2A0; o += 8) if (caption.getUint32(o, true) === hash) caption.setInt32(o + 4, value, true);
+  };
+  setCaption(0x1E55ECC5, 7 * 4); setCaption(0x74BD05D0, 10 * 4); setCaption(0xA9557547, 123);
+  setCaption(0x9811A3F7, 2026); setCaption(0xDFD840D3, 11); setCaption(0xBD46F485, 13);
+  const summary = slotSummary(f.p, f.c, catalog);
+  assert.deepEqual([summary.hearts, summary.maxHearts, summary.rupees, summary.area, summary.rewards],
+    [7, 10, 123, 'KokiriForest', 2]);
+  assert.ok(summary.time.valid);
+  assert.equal(summary.image, null);              // the fixture has no screenshot
+  // Unreadable files leave their parts out instead of failing the backup.
+  const noProgress = slotSummary(new Uint8Array(), f.c, catalog);
+  assert.deepEqual([noProgress.area, noProgress.rewards, noProgress.rupees], [undefined, undefined, 123]);
+  const noCaption = slotSummary(f.p, new Uint8Array(), catalog);
+  assert.deepEqual([noCaption.time, noCaption.hearts, noCaption.rewards], [null, undefined, 2]);
+});
+
 test('ZIP entries carry the save time, or the current time when the save has none', async () => {
   const entryTimes = async (...args) => {
     const bytes = Buffer.from(await api.zip([['a.sav', new Uint8Array([1])], ['b.sav', new Uint8Array([2])]], ...args).arrayBuffer());
