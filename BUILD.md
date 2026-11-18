@@ -38,9 +38,22 @@ The script places `linux/dist/oot-sw2se.pyz`, a single executable file that bund
 
 GitHub Actions also runs this script with `--appimage` ([`.github/workflows/linux.yml`](.github/workflows/linux.yml)): download the app from a run in the Actions tab, or from a release, where it is attached as `OOT-SW2SE-<version>-linux.pyz` and `OOT-SW2SE-<version>-linux-x86_64.AppImage`. See [`linux/README.md`](linux/README.md) for usage notes, desktop integration and how the browser host works. The Linux version, including its Linux-only Save Back, was written by aut0mat3d/Claude, vibe-coded with Claude (Anthropic), under the MIT License.
 
+## Web
+
+Use Node.js 20 or later; no other build tools are needed. From a terminal in this folder, run:
+
+```sh
+node web/build.mjs
+```
+
+The script places `web/dist/index.html`, the same `editor.html` unchanged except for the added browser host (`web/browser-host.js`) and the version from `Program.cs`, with `favicon.ico` and `LICENSE.txt` in `web/dist`. Serve the folder from any web server or open `index.html` from disk.
+
+`docker build -f web/Dockerfile -t oot-sw2se-web .` builds a container image that runs the tests, then serves the page with static-web-server on port 8080. GitHub Actions builds it for amd64 and arm64 ([`.github/workflows/web.yml`](.github/workflows/web.yml)), pushes it to `ghcr.io/<owner>/oot-sw2se` (`:edge` from the main branch; `:latest` and `:<version>` from releases) and attaches the page to releases as `OOT-SW2SE-<version>-web.zip`. See [`web/README.md`](web/README.md).
+
 ## Checks
 
-Run `node --test tests/editor.test.cjs` for synthetic save regression tests.
+Run `node --test tests/editor.test.cjs` for synthetic save regression tests,
+and `node --test tests/web-host.test.cjs` for the web version's host and build.
 Run `python3 -m unittest discover -s linux/tests -v` for the Linux host's backup
 reading, export, page and server checks.
 On a Mac with Swift and Mono installed, run `python3 tests/host_exports.py` to

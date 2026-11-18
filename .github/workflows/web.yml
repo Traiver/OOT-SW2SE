@@ -1,0 +1,173 @@
+# web.yml
+#
+# Builds the web version (web/Dockerfile): a container image that serves the
+# editor with static-web-server, and the page itself as
+# OOT-SW2SE-<version>-web.zip (index.html, favicon.ico, LICENSE.txt). The
+# Dockerfile runs the editor and web host tests; a failing test fails the
+# build.
+#
+# - Pull requests: build and test only; nothing is pushed.
+# - Pushes to main: also push ghcr.io/<owner>/<repo>:edge and :sha-<commit>.
+# - Published releases: also push :<version>, :<major>.<minor> and :latest,
+#   and attach the zip to the release, next to the other platforms' files.
+#
+# The image holds only the server binary, its settings and the page. The
+# Node.js stages run once on the runner's own platform and are shared by the
+# amd64 and arm64 images, so no emulation is needed. Layers are cached in the
+# GitHub Actions cache, so a run whose inputs didn't change takes seconds.
+
+name: Web build
+
+on:
+  push:
+    branches: [main]
+    # Only the files that go into the page or the image, or produce them.
+    paths:
+      - "web/**"
+      - "editor.html"
+      - "editor.ico"
+      - "Program.cs"
+      - "LICENSE"
+      - "tests/editor.test.cjs"
+      - "tests/web-host.test.cjs"
+      - ".github/workflows/web.yml"
+  pull_request:
+    paths:
+      - "web/**"
+      - "editor.html"
+      - "editor.ico"
+      - "Program.cs"
+      - "LICENSE"
+      - "tests/editor.test.cjs"
+      - "tests/web-host.test.cjs"
+      - ".github/workflows/web.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+# A newer push to the same pull request replaces a build still running.
+concurrency:
+  group: web-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      # Write access is used only to attach the zip to a release, and to push
+      # the image. Pull requests from forks always get a read-only token.
+      contents: write
+      packages: write
+    env:
+      PUSH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Read the version
+        id: version
+        run: |
+          version="$(sed -nE 's/.*AssemblyVersion\("([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' Program.cs)"
+          if [[ -z "$version" ]]; then
+            echo "error: no AssemblyVersion in Program.cs" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+
+      # Image name and tags. The name is lowercased, as registries require.
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=edge,branch=main
+            type=sha,enable=${{ github.event_name != 'pull_request' }}
+            type=semver,pattern={{version}},value=${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.version.outputs.version }},enable=${{ github.event_name == 'release' }}
+            type=ref,event=pr
+          flavor: |
+            latest=${{ github.event_name == 'release' }}
+          labels: |
+            org.opencontainers.image.title=OOT SW2SE
+            org.opencontainers.image.description=Save editor for the Nintendo Switch 2 remake of The Legend of Zelda: Ocarina of Time, in the browser
+
+      - name: Log in to the GitHub Container Registry
+        if: env.PUSH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      # Runs the tests (test stage) and builds the image for both platforms.
+      # mode=max also caches the intermediate stages, so later runs reuse the
+      # tested build when only unrelated files changed.
+      - name: Build, test and push the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: web/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUSH == 'true' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+
+      # Exports the page from the cache filled above, without rebuilding.
+      - name: Export the page
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: web/Dockerfile
+          target: site
+          outputs: type=local,dest=web/dist
+          cache-from: type=gha,scope=web
+
+      - name: Zip the page
+        id: zip
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          zip="$PWD/web/OOT-SW2SE-$VERSION-web.zip"
+          (cd web/dist && zip -X -9 "$zip" index.html favicon.ico LICENSE.txt)
+          echo "path=$zip" >> "$GITHUB_OUTPUT"
+
+      # Upload the zip as it is instead of wrapping it in a second zip.
+      - name: Upload the zip as a workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.zip.outputs.path }}
+          archive: false
+          if-no-files-found: error
+          overwrite: true
+
+      - name: Attach the zip to the release
+        if: github.event_name == 'release'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+          ZIP: ${{ steps.zip.outputs.path }}
+        # --clobber replaces the asset when the run is re-run.
+        run: gh release upload "$TAG" "$ZIP" --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Summary
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          {
+            echo "### Web version ${{ steps.version.outputs.version }}"
+            if [[ "$PUSH" == "true" ]]; then
+              echo "Pushed:"
+              echo '```'
+              echo "$TAGS"
+              echo '```'
+            else
+              echo "Built and tested; not pushed (pull request)."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

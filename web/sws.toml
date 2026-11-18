@@ -1,0 +1,30 @@
+# static-web-server settings for the web version's container image
+# (web/Dockerfile). See https://static-web-server.net/configuration/config-file/
+
+[general]
+host = "::"
+port = 8080
+root = "/public"
+log-level = "info"
+# GET /health answers 200 without a log entry, for health checks.
+health = true
+compression = true
+directory-listing = false
+ignore-hidden-files = true
+disable-symlinks = true
+# Replaced by the Cache-Control header below.
+cache-control-headers = false
+
+[advanced]
+
+[[advanced.headers]]
+source = "**"
+[advanced.headers.headers]
+# The page is small; browsers check for a newer version on each visit.
+Cache-Control = "no-cache"
+# The page carries its own Content-Security-Policy. This one only adds what a
+# <meta> policy can't: the page may not be shown inside other sites' frames.
+Content-Security-Policy = "frame-ancestors 'none'"
+X-Content-Type-Options = "nosniff"
+Referrer-Policy = "no-referrer"
+Cross-Origin-Opener-Policy = "same-origin"

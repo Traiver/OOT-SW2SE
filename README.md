@@ -33,6 +33,10 @@ Save Back is the only one that touches `editor.html`: a **Save Back** button, hi
 
 The Linux version, Save Back and the save-time features below were written by aut0mat3d/Claude in 2026, vibe-coded with Claude (Anthropic), and are released under the MIT License like the rest of the project.
 
+## Web version
+
+[`web/`](web/) adds a web version: the same, unchanged editor in a web browser, with nothing to install. The browser's own file pickers open the save and save the patch; nothing is uploaded. Run it as a small container image (`docker run --rm -p 8080:8080 ghcr.io/traiver/oot-sw2se:latest`, then open <http://localhost:8080>) or put the files from a release's `OOT-SW2SE-<version>-web.zip` on any web server. See [`web/README.md`](web/README.md) for what works in which browser, building and how it works.
+
 ## Save time: newest slot and ZIP timestamps
 
 *Added by aut0mat3d/Claude (2026), vibe-coded with Claude (Anthropic); MIT License. Shared by all platforms.*

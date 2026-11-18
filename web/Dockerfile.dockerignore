@@ -1,0 +1,12 @@
+# Only the files web/Dockerfile copies, so other changes don't invalidate the
+# build cache.
+*
+!LICENSE
+!Program.cs
+!editor.html
+!editor.ico
+!web/build.mjs
+!web/browser-host.js
+!web/sws.toml
+!tests/editor.test.cjs
+!tests/web-host.test.cjs
