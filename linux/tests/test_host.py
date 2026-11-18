@@ -173,6 +173,89 @@ class BackupReaderTests(TempDirTest):
         os.mkdir(os.path.join(self.root, "files"))
         self.assertEqual(paths(host.BackupReader.read(self.root))[0], "Backup/files/slot_01/progress.sav")
 
+    def port_save(self, saves: str, profile: str = host.PORT_GAME_USER) -> str:
+        """A PC port's profile folder: slots, option.sav and account.sav."""
+        folder = os.path.join(saves, profile)
+        save_pair(os.path.join(folder, "slot_00"))
+        save_pair(os.path.join(folder, "slot_03"))
+        write(os.path.join(folder, "option.sav"))
+        write(os.path.join(folder, "account.sav"), b"account")
+        return folder
+
+    PORT_PATHS = ["Backup/files/slot_00/progress.sav", "Backup/files/slot_00/caption.sav",
+                  "Backup/files/slot_03/progress.sav", "Backup/files/slot_03/caption.sav",
+                  "Backup/files/option.sav", "Backup/files/account.sav"]
+
+    def test_longshot_data_folder(self) -> None:
+        data = os.path.join(self.root, "longshot")
+        profile = self.port_save(os.path.join(data, "save"))
+        os.makedirs(os.path.join(data, "cache", "0"))
+        for picked in (data, os.path.join(data, "save"), profile):
+            self.assertEqual(paths(host.BackupReader.read(picked)), self.PORT_PATHS, picked)
+        account = host.BackupReader.read(data)[-1]
+        self.assertEqual(base64.b64decode(account["contents"]), b"account")
+
+    def test_relink_game_folder(self) -> None:
+        game = os.path.join(self.root, "Games", "ReLink")
+        self.port_save(os.path.join(game, "user", "save"))
+        os.makedirs(os.path.join(game, "romfs"))
+        write(os.path.join(game, "image.bin"))
+        for picked in (game, os.path.join(game, "user")):
+            self.assertEqual(paths(host.BackupReader.read(picked)), self.PORT_PATHS, picked)
+
+    def test_several_port_profiles(self) -> None:
+        saves = os.path.join(self.root, "longshot", "save")
+        self.port_save(saves, "0123456789abcdef0123456789abcdef")
+        os.makedirs(os.path.join(saves, "empty-profile"))
+        self.assertEqual(host.port_profile_folder(saves), os.path.join(saves, "0123456789abcdef0123456789abcdef"))
+        # The profile the ports open wins over a stray one.
+        game = self.port_save(saves)
+        self.assertEqual(host.port_profile_folder(saves), game)
+        self.assertEqual(host.port_profile_folder(os.path.dirname(saves)), game)
+        os.rename(game, os.path.join(saves, "fedcba9876543210fedcba9876543210"))
+        with self.assertRaisesRegex(host.HostError, "several profiles. Open one of them: "
+                                    "0123456789abcdef0123456789abcdef, fedcba9876543210fedcba9876543210"):
+            host.BackupReader.read(os.path.dirname(saves))
+
+    def test_switch_emulator_data_folders(self) -> None:
+        # Lichii (~/.local/share/lichii), Fritchii and Eden (.../eden): the save of
+        # profile <id> sits in nand/user/save/0000000000000000/<id>/<title id>.
+        profile = "E571F9CCBF8984318D5EE33D0A8D0868"
+        data = os.path.join(self.root, "lichii")
+        title = self.port_save(os.path.join(data, "nand", "user", "save", "0000000000000000", profile), host.TITLE_ID)
+        write(os.path.join(data, "nand", "user", "save", "0000000000000000", profile, "0400C3F00006E000", "Play", "account.sav"))
+        os.makedirs(os.path.join(data, "nand", "system", "save", "8000000000000010"))
+        for picked in (data, os.path.join(data, "nand"), os.path.join(data, "nand", "user", "save"),
+                       os.path.join(data, "nand", "user", "save", "0000000000000000"),
+                       os.path.join(data, "nand", "user", "save", "0000000000000000", profile), title):
+            self.assertEqual(paths(host.BackupReader.read(picked)), self.PORT_PATHS, picked)
+
+    def test_switch_emulator_account_layout_and_portable_install(self) -> None:
+        newer = os.path.join(self.root, "eden")
+        self.port_save(os.path.join(newer, "nand", "user", "save", "account", "0123", host.TITLE_ID), "0")
+        self.assertEqual(paths(host.BackupReader.read(newer)), self.PORT_PATHS)
+        portable = os.path.join(self.root, "Fritchii")
+        self.port_save(os.path.join(portable, "user", "nand", "user", "save", "0000000000000000", "AB12"), host.TITLE_ID)
+        write(os.path.join(portable, "fritchii.exe"))
+        self.assertEqual(paths(host.BackupReader.read(portable)), self.PORT_PATHS)
+
+    def test_several_emulator_profiles_are_listed(self) -> None:
+        saves = os.path.join(self.root, "lichii", "nand", "user", "save", "0000000000000000")
+        self.port_save(os.path.join(saves, "AAAA"), host.TITLE_ID)
+        self.port_save(os.path.join(saves, "BBBB"), host.TITLE_ID)
+        os.makedirs(os.path.join(saves, "CCCC", "0100000000010000"))  # another game's save only
+        with self.assertRaisesRegex(host.HostError, "several profiles. Open one of them: AAAA, BBBB."):
+            host.BackupReader.read(os.path.join(self.root, "lichii"))
+        self.assertEqual(host.port_profile_folder(os.path.join(saves, "BBBB")), os.path.join(saves, "BBBB", host.TITLE_ID))
+
+    def test_saves_in_the_picked_folder_win_over_port_folders(self) -> None:
+        backup = os.path.join(self.root, "Backup")
+        save_pair(os.path.join(backup, "files", "slot_01"))
+        self.port_save(os.path.join(backup, "save"))
+        self.assertIsNone(host.port_profile_folder(backup))
+        self.assertEqual(paths(host.BackupReader.read(backup)),
+                         ["Backup/files/slot_01/progress.sav", "Backup/files/slot_01/caption.sav"])
+
     def test_no_saves(self) -> None:
         with self.assertRaisesRegex(host.HostError, "No folder containing"):
             host.BackupReader.read(self.root)
@@ -656,6 +739,21 @@ class SaveBackTests(TempDirTest):
         self.assertRegex(os.path.basename(result["backup"]), r"^0100000000001234_slot02_")
         with open(os.path.join(backup, "manifest.json"), "rb") as file:
             self.assertEqual(file.read(), b"{}")
+
+    def test_port_data_folder_saves_back_into_the_profile(self) -> None:
+        data = os.path.join(self.root, "relink")
+        profile = os.path.join(data, "save", host.PORT_GAME_USER)
+        for name in ("progress.sav", "caption.sav"):
+            write(os.path.join(profile, "slot_01", name), SAVE + b"port " + name.encode())
+        write(os.path.join(profile, "account.sav"), SAVE + b"account")
+        self.assertIn("Backup/files/account.sav", self.open(data))
+        result = self.save_back({"Backup/files/slot_01/progress.sav": SAVE + b"port edited"})
+        with open(os.path.join(profile, "slot_01", "progress.sav"), "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"port edited")
+        with zipfile.ZipFile(result["backup"]) as archive:
+            self.assertEqual(archive.read("slot_01/progress.sav"), SAVE + b"port progress.sav")
+        with open(os.path.join(profile, "account.sav"), "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"account", "files that were not edited stay as they were")
 
     def test_page_announces_save_back(self) -> None:
         page = host.build_page(host.resource("editor.html").decode(), "1.0.0",

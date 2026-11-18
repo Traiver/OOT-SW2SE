@@ -158,6 +158,56 @@ function setSaveTime(f, [year, month, day, hour, minute, second], auto = 1) {
   for (const [hash, value] of values) view.setInt32(offsets.get(hash), value, true);
 }
 
+test('Save Copy holds every opened file, with the edited ones replaced and the originals only read', async () => {
+  const { findBackupFiles, copyLayout } = vm.runInContext('({ findBackupFiles, copyLayout })', context);
+  const reads = [];
+  const file = (webkitRelativePath, text) => ({ webkitRelativePath,
+    arrayBuffer: async () => { reads.push(webkitRelativePath); return new TextEncoder().encode(text).buffer; } });
+  const text = bytes => new TextDecoder().decode(bytes);
+  const files = ['slot_00/progress.sav', 'slot_00/caption.sav', 'slot_02/progress.sav', 'slot_02/caption.sav',
+    'option.sav', 'account.sav'].map(path => file('Backup/files/' + path, 'original ' + path));
+  const backup = findBackupFiles([...files, file('Backup/manifest.json', '{}')]);
+  assert.equal(backup.account.webkitRelativePath, 'Backup/files/account.sav');
+  const edits = [{ path: 'slot_02/progress.sav', after: new TextEncoder().encode('edited progress') },
+    { path: 'option.sav', after: new TextEncoder().encode('edited option') }];
+  const copy = await copyLayout(backup, edits, '{"manifest":1}', new Date(Date.UTC(2026, 10, 17, 9, 30, 5)),
+    '01234567-89ab-cdef-0123-456789abcdef');
+  assert.equal(copy.name, 'Ocarina-of-Time-Copy-20261117_093005_01234567-89ab-cdef-0123-456789abcdef');
+  assert.deepEqual(Array.from(copy.entries, ([path, bytes]) => [path, typeof bytes === 'string' ? bytes : text(bytes)]), [
+    ['20261117_093005/slot_00/progress.sav', 'original slot_00/progress.sav'],
+    ['20261117_093005/slot_00/caption.sav', 'original slot_00/caption.sav'],
+    ['20261117_093005/slot_02/progress.sav', 'edited progress'],
+    ['20261117_093005/slot_02/caption.sav', 'original slot_02/caption.sav'],
+    ['20261117_093005/option.sav', 'edited option'],
+    ['20261117_093005/account.sav', 'original account.sav'],
+    ['manifest.json', '{"manifest":1}'],
+  ]);
+  assert.ok(!reads.includes('Backup/files/slot_02/progress.sav'), 'edited files are not read again');
+
+  // A loose save keeps its files at the top of the timestamp folder.
+  const loose = findBackupFiles(['progress.sav', 'caption.sav', 'account.sav'].map(name => file('My Save/' + name, name)));
+  const looseCopy = await copyLayout(loose, [{ path: 'caption.sav', after: new Uint8Array([1]) }], undefined, new Date(0), 'u');
+  assert.deepEqual(Array.from(looseCopy.entries, ([path]) => path),
+    ['19700101_000000/progress.sav', '19700101_000000/caption.sav', '19700101_000000/account.sav']);
+  await assert.rejects(copyLayout(loose, [{ path: 'option.sav', after: new Uint8Array([1]) }]), /No opened file for option\.sav/);
+});
+
+test('Save Copy of a real edit: the copied slot reads back with the edit, the other slot unchanged', async () => {
+  const { copyLayout, slotEdits } = vm.runInContext('({ copyLayout, slotEdits })', context);
+  const edited = fixture(); const other = fixture();
+  const slot = edited.slot();
+  const after = api.updateSlot(slot, changes(slot, { rupees: 150 }), editable);
+  const asFile = (path, bytes) => ({ webkitRelativePath: path, arrayBuffer: async () => bytes.slice().buffer });
+  const backup = { slots: [
+    { id: 'slot_00', progress: asFile('a', other.p), caption: asFile('b', other.c) },
+    { id: 'slot_01', progress: asFile('c', edited.p), caption: asFile('d', edited.c) }] };
+  const copy = await copyLayout(backup, slotEdits({ id: 'slot_01' }, slot, after));
+  const entry = path => copy.entries.find(([name]) => name.endsWith(path))[1];
+  assert.equal(api.readSlot(entry('slot_01/progress.sav'), entry('slot_01/caption.sav')).rupees, 150);
+  assert.ok(Buffer.from(entry('slot_00/progress.sav')).equals(Buffer.from(other.p)), 'the other slot is copied as it was');
+  assert.equal(api.readSlot(edited.p, edited.c).rupees, 0, 'the opened bytes are unchanged');
+});
+
 test('save time is read from caption.sav to the second and shown as day.month.year', () => {
   const f = fixture(); setSaveTime(f, [2026, 11, 13, 0, 12, 41], 0);
   const time = api.saveTime(f.slot().c);

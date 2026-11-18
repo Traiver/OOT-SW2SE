@@ -86,6 +86,82 @@ struct HostError: LocalizedError {
 /// Reads save files from a folder chosen by the user. Based on
 /// `EditorWindow.ReadBackup` in Program.cs, with the extra layouts and checks
 /// described on `read(folder:)` and `readFile`.
+/// PC ports (Longshot, Project ReLink) and Switch emulators (Lichii, Fritchii,
+/// Eden) keep the same save files as the Switch, in the layouts below, relative
+/// to their data or game folder. When the picked folder holds no save itself,
+/// the save folder is looked for along those paths; the picked folder may be
+/// any folder on the way. Same rules as the Windows and Linux hosts.
+enum PortSaves {
+    /// The one profile both ports open (their nn_applet user id).
+    static let gameUser = "5a3c9e1f0b7d24680000000000000001"
+    static let titleID = "0400486024DEC000"
+
+    /// "<id>" is a profile folder.
+    static let layouts: [[String]] = [
+        // Longshot (%APPDATA%\Longshot, ~/.local/share/longshot), Project ReLink on Linux (~/.local/share/relink)
+        ["save", "<id>"],
+        // Project ReLink's game folder on Windows (<game folder>\user\save\<id>)
+        ["user", "save", "<id>"],
+        // Lichii (%APPDATA%\lichii, ~/.local/share/lichii), Fritchii and Eden (.../eden), and their newer layout
+        ["nand", "user", "save", "0000000000000000", "<id>", titleID],
+        ["nand", "user", "save", "account", "<id>", titleID, "0"],
+        // The same emulators installed portable: a "user" folder next to the program
+        ["user", "nand", "user", "save", "0000000000000000", "<id>", titleID],
+        ["user", "nand", "user", "save", "account", "<id>", titleID, "0"],
+    ]
+
+    /// The save folder to open for `folder`, or nil when `folder` holds a save
+    /// itself or none is found.
+    /// - Throws: `HostError` when several profiles hold saves and none is the
+    ///   one the ports open.
+    static func profileFolder(_ folder: URL) throws -> URL? {
+        if holdsSlots(folder) || holdsSlots(folder.appendingPathComponent("files")) { return nil }
+        var found: [(profile: String, url: URL)] = []
+        for layout in layouts {
+            for start in layout.indices {
+                for match in matches(folder, Array(layout[start...]), profile: nil)
+                    where !found.contains(where: { $0.url.standardizedFileURL == match.url.standardizedFileURL }) {
+                    found.append(match)
+                }
+            }
+        }
+        if found.isEmpty { return nil }
+        if found.count == 1 { return found[0].url }
+        if let game = found.first(where: { $0.profile.lowercased() == gameUser }) { return game.url }
+        let names = Set(found.map(\.profile)).sorted()
+        throw HostError("This folder holds the saves of several profiles. Open one of them: " +
+                        names.joined(separator: ", ") + ".")
+    }
+
+    private static func matches(_ folder: URL, _ parts: [String], profile: String?) -> [(profile: String, url: URL)] {
+        guard let head = parts.first else {
+            return holdsSlots(folder) ? [(profile ?? folder.lastPathComponent, folder)] : []
+        }
+        let rest = Array(parts.dropFirst())
+        if head != "<id>" {
+            let child = folder.appendingPathComponent(head)
+            return isFolder(child) ? matches(child, rest, profile: profile) : []
+        }
+        let children = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
+        return children.sorted { $0.lastPathComponent < $1.lastPathComponent }.filter(isFolder).flatMap { child in
+            matches(child, rest, profile: child.lastPathComponent)
+        }
+    }
+
+    private static func isFolder(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+
+    private static func holdsSlots(_ folder: URL) -> Bool {
+        (0..<HostLimits.slotCount).contains { index in
+            let slot = folder.appendingPathComponent(String(format: "slot_%02d", index))
+            return FileManager.default.fileExists(atPath: slot.appendingPathComponent("progress.sav").path)
+                && FileManager.default.fileExists(atPath: slot.appendingPathComponent("caption.sav").path)
+        }
+    }
+}
+
 enum BackupReader {
     /// One file sent to the page: a virtual relative path plus base64 contents.
     typealias Entry = [String: String]
@@ -104,8 +180,12 @@ enum BackupReader {
     ///   2. Any other folder that directly holds progress.sav + caption.sav
     ///      (one loose save), optionally with option.sav next to them.
     ///   3. A backup folder with slot_00...slot_05 subfolders, either directly
-    ///      or inside a "files" subfolder, plus optional option.sav and
-    ///      manifest.json. Picking the "files" folder itself works too.
+    ///      or inside a "files" subfolder, plus optional option.sav,
+    ///      account.sav and manifest.json. Picking the "files" folder itself
+    ///      works too.
+    ///   4. A PC port's or Switch emulator's data or game folder, or any folder
+    ///      on the way to the save: the save folder inside it is read like 3
+    ///      (see `PortSaves`).
     /// - Throws: `HostError` when no save pair is found or limits are exceeded.
     static func read(folder: URL) throws -> [Entry] {
         var files: [Entry] = []
@@ -126,17 +206,20 @@ enum BackupReader {
                 name = "Save"
             }
             try readPair(into: &files, folder: folder, prefix: name + "/", total: &totalBytes)
-            let localOption = folder.appendingPathComponent("option.sav")
-            if exists(localOption) {
-                try readFile(into: &files, url: localOption, relativePath: name + "/option.sav", total: &totalBytes)
+            for extra in ["option.sav", "account.sav"] where exists(folder.appendingPathComponent(extra)) {
+                try readFile(into: &files, url: folder.appendingPathComponent(extra), relativePath: name + "/" + extra,
+                             total: &totalBytes)
             }
             return files
         }
 
+        // A PC port's or Switch emulator's data or game folder: open the save folder inside it.
+        let saveFolder = try PortSaves.profileFolder(folder) ?? folder
+
         // Prefer a "files" subfolder, but only if it really holds slots: an
         // empty or unrelated "files" folder must not hide slots at the root.
-        let nested = folder.appendingPathComponent("files")
-        let slotsFolder = isDirectory(nested) && !slotFolders(in: nested).isEmpty ? nested : folder
+        let nested = saveFolder.appendingPathComponent("files")
+        let slotsFolder = isDirectory(nested) && !slotFolders(in: nested).isEmpty ? nested : saveFolder
         let slots = slotFolders(in: slotsFolder)
         if slots.isEmpty {
             throw HostError("No folder containing progress.sav and caption.sav was found.")
@@ -168,14 +251,14 @@ enum BackupReader {
         return lower
     }
 
-    /// Adds the backup-wide files that sit around the slots: option.sav next
-    /// to the slot folders, and manifest.json in the backup root, which is the
-    /// parent of a folder named "files" (so picking "files" itself still
-    /// finds the manifest and keeps it in sync with the patch).
+    /// Adds the backup-wide files that sit around the slots: option.sav and
+    /// account.sav next to the slot folders, and manifest.json in the backup
+    /// root, which is the parent of a folder named "files" (so picking "files"
+    /// itself still finds the manifest and keeps it in sync with the patch).
     private static func readExtras(into files: inout [Entry], slotsFolder: URL, total: inout Int) throws {
-        let option = slotsFolder.appendingPathComponent("option.sav")
-        if exists(option) {
-            try readFile(into: &files, url: option, relativePath: backupPrefix + "option.sav", total: &total)
+        for extra in ["option.sav", "account.sav"] where exists(slotsFolder.appendingPathComponent(extra)) {
+            try readFile(into: &files, url: slotsFolder.appendingPathComponent(extra), relativePath: backupPrefix + extra,
+                         total: &total)
         }
         let root = slotsFolder.lastPathComponent.lowercased() == "files"
             ? slotsFolder.deletingLastPathComponent() : slotsFolder

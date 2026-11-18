@@ -58,5 +58,7 @@ Run `python3 -m unittest discover -s linux/tests -v` for the Linux host's backup
 reading, export, page and server checks.
 On a Mac with Swift and Mono installed, run `python3 tests/host_exports.py` to
 compile and exercise the actual Swift and C# folder export helpers, including
-path validation and byte-for-byte output checks. These checks do not replace
-in-game testing with a real save.
+path validation and byte-for-byte output checks, and how both hosts find a PC
+port's save folder. It also runs on Linux, for example in the `swift:6.0-noble`
+container with `mono-mcs` and `mono-runtime` installed. These checks do not
+replace in-game testing with a real save.

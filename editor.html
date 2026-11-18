@@ -251,6 +251,7 @@ html.landing { overflow: hidden; }
       <button id="save-back" type="submit" form="edit" hidden>Save Back</button>
       <button id="export" class="primary" type="submit" form="edit">Save Patch ZIP</button>
       <button id="export-folder" type="submit" form="edit">Export to Folder</button>
+      <button id="export-copy" type="submit" form="edit">Save Copy ZIP</button>
       <button id="reset" type="button">Reset All Edits</button>
       <span id="pending" class="muted" aria-live="polite"></span>
     </div>
@@ -850,7 +851,8 @@ function findBackupFiles(files) {
       const match = /^([^/]+)\/progress\.sav$/.exec(path);
       if (!match) continue;
       const caption = entries.get(match[1] + '/caption.sav');
-      if (caption) return { slots: [{ id: match[1], progress, caption, loose: true }], option: entries.get(match[1] + '/option.sav') };
+      if (caption) return { slots: [{ id: match[1], progress, caption, loose: true }], option: entries.get(match[1] + '/option.sav'),
+        account: entries.get(match[1] + '/account.sav') };
     }
     throw Error("No folder containing progress.sav and caption.sav was found.");
   }
@@ -860,6 +862,7 @@ function findBackupFiles(files) {
   return {
     slots: candidates.sort((a, b) => a.id.localeCompare(b.id)),
     option: entries.get(base + 'option.sav'),
+    account: entries.get(base + 'account.sav'),
     manifest: entries.get(manifestPath),
   };
 }
@@ -869,12 +872,36 @@ function slotEdits(active, slot, after) {
   return paths.map((path, i) => ({ path, before: [slot.p.bytes, slot.c.bytes][i], after: after[i] }));
 }
 
+function exportStamp(date) {
+  return date.toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_');
+}
+
 function exportLayout(active, edits, date = new Date(), uuid = globalThis.crypto.randomUUID()) {
-  const timestamp = date.toISOString().slice(0, 19).replace(/[-:]/g, '').replace('T', '_');
+  const timestamp = exportStamp(date);
   return {
     name: 'Ocarina-of-Time-' + (active.loose ? 'Save' : active.id) + '-Patch-' + timestamp + '_' + uuid,
     entries: edits.map(({ path, after }) => [timestamp + '/' + path, after]),
   };
+}
+
+// Save Copy: the whole opened save with this slot's edits: every slot, option.sav
+// and account.sav the host read, laid out like the save folder inside the UTC
+// timestamp folder, and manifest.json for a full backup. The opened files are
+// only read, so the original save stays as it is.
+async function copyLayout(backup, edits, manifest, date = new Date(), uuid = globalThis.crypto.randomUUID()) {
+  const timestamp = exportStamp(date);
+  const edited = new Map(edits.map(({ path, after }) => [path, after]));
+  const files = backup.slots.flatMap(slot => [['progress.sav', slot.progress], ['caption.sav', slot.caption]]
+    .map(([name, file]) => [slot.loose ? name : slot.id + '/' + name, file]));
+  if (backup.option) files.push(['option.sav', backup.option]);
+  if (backup.account) files.push(['account.sav', backup.account]);
+  const entries = await Promise.all(files.map(async ([path, file]) =>
+    [timestamp + '/' + path, edited.get(path) ?? new Uint8Array(await file.arrayBuffer())]));
+  for (const path of edited.keys()) {
+    if (!files.some(([name]) => name === path)) throw Error("No opened file for " + path + '.');
+  }
+  if (manifest) entries.push(['manifest.json', manifest]);
+  return { name: 'Ocarina-of-Time-Copy-' + timestamp + '_' + uuid, entries };
 }
 
 // Save Back: added by aut0mat3d/Claude (2026), vibe-coded with Claude
@@ -1312,6 +1339,7 @@ function initialize() {
     get('patch-info').textContent = active.loose
       ? "Copy the files inside the UTC timestamp folder into a copy of your save folder. Exports contain replacement files, not a full backup."
       : "Copy the contents of the UTC timestamp folder into the files folder of a copy of your full backup. Copy manifest.json to the backup root when included. Exports contain replacement files, not a full backup.";
+    get('patch-info').textContent += " Save Copy ZIP instead holds the whole save with the edits, every slot included: its UTC timestamp folder can take the place of your save folder. Keep the original folder as your backup.";
     if (desktop.features.saveBack) {
       get('patch-info').textContent += " Save Back writes the edits straight into the opened files. The files it replaces are first kept as a ZIP" +
         (desktop.features.saveBack.backupFolder ? " in " + desktop.features.saveBack.backupFolder : '') + ".";
@@ -1446,11 +1474,14 @@ function initialize() {
     const button = get('export');
     const folderButton = get('export-folder');
     const backButton = get('save-back');
+    const copyButton = get('export-copy');
     const toFolder = event.submitter === folderButton;
     const toBackup = event.submitter === backButton;
+    const toCopy = event.submitter === copyButton;
     button.disabled = true;
     folderButton.disabled = true;
     backButton.disabled = true;
+    copyButton.disabled = true;
     result.textContent = '';
     const current = revision;
     try {
@@ -1482,6 +1513,17 @@ function initialize() {
         }
       }
       if (current !== revision) return;
+      if (toCopy) {
+        // A copy of a full backup needs a manifest that matches the edited files.
+        if (manifestSource && !manifest) throw Error("The backup manifest could not be updated. Nothing was saved.");
+        const copy = await copyLayout(backup, edits, manifest);
+        if (current !== revision) return;
+        const saved = await desktop.savePatch(copy.name + '.zip', zip(copy.entries));
+        if (current === revision) {
+          result.textContent = saved ? "Copy of the save with the edits to " + active.id + " saved. " + saved : "Save canceled.";
+        }
+        return;
+      }
       if (toBackup) {
         // A full backup's manifest lists the hashes of its files; writing the
         // files without it would leave the backup inconsistent.
@@ -1506,6 +1548,7 @@ function initialize() {
       button.disabled = false;
       folderButton.disabled = false;
       backButton.disabled = false;
+      copyButton.disabled = false;
     }
   });
 }
