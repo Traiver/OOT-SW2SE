@@ -7,7 +7,7 @@ const catalog = JSON.parse(html.match(/<script id="catalog" type="application\/j
 const context = vm.createContext({ TextEncoder, TextDecoder, Blob, crypto: require('node:crypto').webcrypto,
   window: { chrome: { webview: { addEventListener() {}, postMessage() {} } } } });
 vm.runInContext(html.match(/<script>\s*('use strict';.*?)<\/script>/s)[1], context);
-const api = vm.runInContext('({readSlot, updateSlot, editOptions, removalIssue, acquisitionFlags, zip, exportLayout, saveTime, formatSaveTime, newestSlot, saveBackEntries, replaceOpenedFiles})', context);
+const api = vm.runInContext('({readSlot, updateSlot, editOptions, removalIssue, acquisitionFlags, zip, exportLayout, saveTime, formatSaveTime, newestSlot, saveBackEntries, replaceOpenedFiles, progressChecklist, checklistSummary, checklistGroups})', context);
 const editable = api.editOptions(catalog);
 const item = name => catalog.inventory.find(row => row[1] === name)[0];
 const registration = hash => catalog.registrations.find(([stocks]) => stocks.includes(hash));
@@ -320,6 +320,94 @@ test('swim depth writes the float a save already carries, and leaves it alone wh
   assert.equal(untouched.p.view.getFloat32(untouched.p.at(depth), true), 6);
   assert.throws(() => edit(f, { swimDepth: 41 }), /between 0 and 40/);
   assert.throws(() => edit(f, { swimDepth: Number.NaN }), /between 0 and 40/);
+});
+
+// MurmurHash3 (x86, 32-bit, seed 0): the hash of a field name in the save.
+function murmur3(text) {
+  const data = new TextEncoder().encode(text);
+  const mul = (a, b) => Math.imul(a, b) >>> 0;
+  const rotl = (x, r) => ((x << r) | (x >>> (32 - r))) >>> 0;
+  let h = 0;
+  const tail = data.length & ~3;
+  for (let i = 0; i < tail; i += 4) {
+    const k = mul(rotl(mul(data[i] | data[i + 1] << 8 | data[i + 2] << 16 | data[i + 3] << 24, 0xCC9E2D51), 15), 0x1B873593);
+    h = (mul(rotl(h ^ k, 13), 5) + 0xE6546B64) >>> 0;
+  }
+  let k = 0;
+  for (let i = data.length - 1; i >= tail; i--) k = (k << 8) | data[i];
+  if (data.length & 3) h = (h ^ mul(rotl(mul(k, 0xCC9E2D51), 15), 0x1B873593)) >>> 0;
+  h = (h ^ data.length) >>> 0;
+  h = mul(h ^ (h >>> 16), 0x85EBCA6B);
+  h = mul(h ^ (h >>> 13), 0xC2B2AE35);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+const objective = (entries, label) => entries.find(entry => entry.label === label);
+
+test('checklist sources exist in the catalog with the expected types; song flags match their field names', () => {
+  const type = new Map(catalog.fields.map(([h, t]) => [h, catalog.types[t]]));
+  assert.equal(murmur3('PlayerStatus.CurrentRupee'), 0xA77921D7);
+  const songs = { "Zelda's Lullaby": 'ZeldaLullaby', "Epona's Song": 'EponaSong', "Saria's Song": 'SariaSong',
+    "Sun's Song": 'SunSong', "Song of Time": 'TimeSong', "Song of Storms": 'StormSong', "Minuet of Forest": 'ForestMinuet',
+    "Bolero of Fire": 'FireBolero', "Serenade of Water": 'WaterSerenade', "Nocturne of Shadow": 'ShadowNocturne',
+    "Requiem of Spirit": 'SpiritRequiem', "Prelude of Light": 'LightPrelude' };
+  for (const { label, items } of api.checklistGroups) {
+    for (const [name, source] of items) {
+      if (source.item) assert.ok(catalog.inventory.some(row => row[1] === source.item), source.item);
+      if (source.flag) assert.equal(type.get(source.flag), 'Bool', name);
+      if (source.count) assert.equal(type.get(source.count), 'Int', name);
+      if (label === 'Songs') assert.equal(source.flag, murmur3('IsGet.Item_Melody_' + songs[name]), name);
+    }
+  }
+  assert.equal(api.checklistGroups.find(g => g.label === 'Songs').items.length, 12);
+});
+
+test('the checklist reads dungeon rewards, songs, items, upgrades and collectibles from the save', () => {
+  const f = fixture(['Item_Boomerang', 'Item_Stone_Forest', 'Weapon_Sword_Kokiri']);
+  f.set(murmur3('IsGet.Item_Melody_SariaSong'), 1);
+  f.set(murmur3('IsGet.Item_Melody_EponaSong'), 1);
+  f.set(0x04735978, 37);                          // Gold Skulltula Tokens
+  f.set(0xFBE01DA1, 10 * 4); f.set(0x31AB5580, 10 * 4);  // 10 hearts
+  const entries = api.progressChecklist(f.slot(), catalog);
+  assert.equal(objective(entries, "Inside the Deku Tree · Kokiri Emerald").value, 1);
+  assert.equal(objective(entries, "Forest Temple · Forest Medallion").value, 0);
+  assert.equal(objective(entries, "Epona's Song").value, 1);
+  assert.equal(objective(entries, "Sun's Song").value, 0);
+  assert.equal(objective(entries, "Boomerang").value, 1);
+  assert.equal(objective(entries, "Kokiri Sword").group, 'Equipment');
+  assert.deepEqual([objective(entries, "Gold Skulltula Tokens").value, objective(entries, "Maximum Hearts").value], [37, 10]);
+  assert.equal(objective(entries, "Magic Meter").value, 0);
+  const { overall, groups } = api.checklistSummary(entries);
+  const group = label => { const { done, total, percent } = groups.find(g => g.label === label); return [done, total, percent]; };
+  assert.deepEqual(group('Dungeons'), [1, 9, 11]);
+  assert.deepEqual(group('Songs'), [2, 12, 16]);
+  assert.deepEqual(group('Items'), [1, 13, 7]);
+  assert.deepEqual(group('Equipment'), [1, 8, 12]);
+  assert.deepEqual(group('Collectibles'), [0, 2, 43]);    // (0.37 + 0.5) / 2
+  // Overall: every objective's share, averaged; 5 done, 37/100 and 10/20 partly.
+  assert.deepEqual([overall.done, overall.total], [5, entries.length]);
+  assert.equal(overall.percent, Math.floor((5 + 0.37 + 0.5) / entries.length * 100));
+});
+
+test('checklist objectives whose field is missing are shown but left out of the totals', () => {
+  const f = fixture();
+  const hash = murmur3('IsGet.Item_Melody_SunSong');
+  new DataView(f.p.buffer).setUint32(40 + catalog.fields.findIndex(([h]) => h === hash) * 8, 0, true);
+  const entries = api.progressChecklist(f.slot(), catalog);
+  assert.equal(objective(entries, "Sun's Song").value, null);
+  const songs = api.checklistSummary(entries).groups.find(g => g.label === 'Songs');
+  assert.deepEqual([songs.done, songs.total], [0, 11]);
+});
+
+test('pending edits show up in the checklist the way they would be exported', () => {
+  const f = fixture();
+  const before = f.slot();
+  const after = edit(f, { additions: [item('Item_Hookshot'), item('Item_Medal_Fire')],
+    amounts: { ...before.counts, skulltulas: 50 }, vitals: { ...before.vitals, maxHearts: 12 } });
+  const entries = api.progressChecklist(after, catalog);
+  assert.equal(objective(entries, "Hookshot").value, 1);
+  assert.equal(objective(entries, "Fire Temple · Fire Medallion").value, 1);
+  assert.deepEqual([objective(entries, "Gold Skulltula Tokens").value, objective(entries, "Maximum Hearts").value], [50, 12]);
+  assert.equal(objective(api.progressChecklist(before, catalog), "Hookshot").value, 0);
 });
 
 module.exports = { fixture };

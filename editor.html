@@ -149,6 +149,10 @@ html.landing { overflow: hidden; }
 @media (max-width: 700px) {
   section { scroll-margin-top: 100px; }
 }
+.progress-card { border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; }
+.progress-card strong { display: block; font-size: 1.15rem; }
+meter { display: block; width: 100%; height: 8px; margin-top: 6px; }
+#checklist-summary { margin-bottom: 14px; }
 
 </style>
 <body>
@@ -166,10 +170,21 @@ html.landing { overflow: hidden; }
   <div id="slot-cards" role="group" aria-label="Save slots" hidden></div>
 </header>
 <main id="main" hidden>
-  <nav aria-label="Editor sections"><button type="button" data-jump="overview-section">Overview</button><button type="button" data-jump="edit-section">Stats</button><button type="button" data-jump="inventory-section">Inventory</button><button type="button" data-jump="flags-section">Progress</button><button type="button" data-jump="export-section">Export</button></nav>
+  <nav aria-label="Editor sections"><button type="button" data-jump="overview-section">Overview</button><button type="button" data-jump="checklist-section">Checklist</button><button type="button" data-jump="edit-section">Stats</button><button type="button" data-jump="inventory-section">Inventory</button><button type="button" data-jump="flags-section">Progress</button><button type="button" data-jump="export-section">Export</button></nav>
   <section id="overview-section">
     <h2>Save Slot</h2>
     <div class="split"><dl id="overview"></dl><img id="preview" alt="Save preview" hidden></div>
+  </section>
+  <section id="checklist-section">
+    <h2>Checklist</h2>
+    <p class="muted">Dungeons, songs, items, upgrades and collectibles the editor can read from this save, including your pending edits. The percentages count these objectives only; they are not the game's own completion rate.</p>
+    <div id="checklist-summary" class="grid"></div>
+    <div class="controls">
+      <input id="checklist-filter" type="search" placeholder="Search checklist" aria-label="Search checklist">
+      <label><input id="checklist-incomplete" type="checkbox"> Incomplete only</label>
+    </div>
+    <p id="checklist-note" class="muted" aria-live="polite" hidden></p>
+    <div class="scroll"><table><thead><tr><th>Objective</th><th>Category</th><th>Status</th><th>Read from</th></tr></thead><tbody id="checklist-rows"></tbody></table></div>
   </section>
   <section id="edit-section">
     <h2>Edit Save</h2>
@@ -1048,6 +1063,111 @@ function fieldValue(save, hash, type) {
   }
 }
 
+// Checklist: objectives the editor can read from progress.sav, grouped like
+// the game's progress. Its percentages count these objectives only; they are
+// not the game's own completion rate. Each source is one of:
+//   item:  the item is in the inventory (its PouchData stock is above 0)
+//   flag:  a Bool field is set (`what` says what it records)
+//   count: an Int field, up to `max`
+//   hearts / magic: the heart containers or magic meter from the vitals
+// The song flags are IsGet.Item_Melody_<song>; field hashes are MurmurHash3
+// (x86, 32-bit, seed 0) of the field name, which is how the four song names
+// missing from the catalog were matched.
+const checklistGroups = [
+  { label: "Dungeons", items: [
+    ["Inside the Deku Tree · Kokiri Emerald", { item: 'Item_Stone_Forest' }],
+    ["Dodongo's Cavern · Goron Ruby", { item: 'Item_Stone_Fire' }],
+    ["Inside Jabu-Jabu's Belly · Zora Sapphire", { item: 'Item_Stone_Water' }],
+    ["Forest Temple · Forest Medallion", { item: 'Item_Medal_Forest' }],
+    ["Fire Temple · Fire Medallion", { item: 'Item_Medal_Fire' }],
+    ["Water Temple · Water Medallion", { item: 'Item_Medal_Water' }],
+    ["Shadow Temple · Shadow Medallion", { item: 'Item_Medal_Shadow' }],
+    ["Spirit Temple · Spirit Medallion", { item: 'Item_Medal_Spirit' }],
+    ["Temple of Time · Light Medallion", { item: 'Item_Medal_Light' }],
+  ] },
+  { label: "Songs", items: [
+    ["Zelda's Lullaby", 0x01C20002], ["Epona's Song", 0xB492AC33], ["Saria's Song", 0xD3F8BFCC],
+    ["Sun's Song", 0x165DD1AD], ["Song of Time", 0x03B3450E], ["Song of Storms", 0x2B39DD4F],
+    ["Minuet of Forest", 0xDC0A0B54], ["Bolero of Fire", 0x49041AB9], ["Serenade of Water", 0x3FA63986],
+    ["Nocturne of Shadow", 0xC2FB95F4], ["Requiem of Spirit", 0x802A36A8], ["Prelude of Light", 0xD6320BA4],
+  ].map(([name, flag]) => [name, { flag, what: "Song learned" }]) },
+  { label: "Quest", items: [
+    ["Ocarina of Time", { item: 'Item_Ocarina_Time' }],
+    ["Master Sword", { item: 'Weapon_Sword_Master' }],
+    ["Gerudo Pass", { item: 'Item_Token_Gerudo' }],
+    ["Echo Gem", { item: 'Item_AgonyStone' }],
+    ["Biggoron Sword", { item: 'Weapon_Sword_Biggoron' }],
+    ["Ganon's Castle barriers dispelled", { flag: 0x36AADC2D, what: "Barriers dispelled" }],
+  ] },
+  { label: "Items", items: [
+    'Weapon_Range_SlingShot', 'Weapon_Range_Bow', 'Item_Boomerang', 'Item_Hookshot', 'Item_Longshot',
+    'Item_Hammer', 'Armor_GlassTruth', 'Item_DinFire', 'Item_FaroreWind', 'Item_NayruLove',
+    'Item_Arrow_Fire', 'Item_Arrow_Ice', 'Item_Arrow_Light',
+  ].map(item => [null, { item }]) },
+  { label: "Equipment", items: [
+    'Weapon_Sword_Kokiri', 'Weapon_Shield_Deku', 'Weapon_Shield_Hylian', 'Weapon_Shield_Mirror',
+    'Armor_Adult_Goron', 'Armor_Adult_Zora', 'Armor_Adult_HeavyBoot', 'Armor_Adult_HoverBoot',
+  ].map(item => [null, { item }]) },
+  { label: "Upgrades", items: [
+    ...['Armor_Child_Gauntlet_Goron', 'Armor_Adult_Gauntlet_Silver', 'Armor_Adult_Gauntlet_Gold',
+      'Item_Scale_Silver', 'Item_Scale_Gold', 'Item_Wallet_Medium', 'Item_Wallet_Large',
+      'Item_BombBag_Large', 'Item_Quiver_Large', 'Item_BulletBag_Large', 'Item_StickBag_Large', 'Item_NutBag_Large',
+      'Item_FairyBless_DefenseDouble'].map(item => [null, { item }]),
+    ["Magic Meter", { magic: 24 }], ["Double Magic Meter", { magic: 48 }],
+  ] },
+  { label: "Collectibles", items: [
+    ["Gold Skulltula Tokens", { count: 0x04735978, max: 100 }],
+    ["Maximum Hearts", { hearts: 20 }],
+  ] },
+];
+
+// Reads each objective from a slot (readSlot's result). `value` is null when
+// the save lacks the field; such objectives are left out of the totals.
+function progressChecklist(slot, catalog) {
+  const items = new Map(catalog.inventory.map(([hash, name, , , title]) => [name, [hash, title || name]]));
+  const p = slot.p;
+  return checklistGroups.flatMap(({ label: group, items: objectives }) => objectives.map(([label, source]) => {
+    let value = null;
+    let max = 1;
+    let from;
+    if (source.item) {
+      const [hash, title] = items.get(source.item);
+      label = label || title;
+      from = title + " in the inventory";
+      if (p.fields.has(hash)) value = Math.min(Math.max(p.int(hash), 0), 1);
+    } else if (source.flag) {
+      from = source.what + " · flag " + HEX(source.flag);
+      const raw = p.fields.has(source.flag) ? p.u32(p.at(source.flag)) : null;
+      if (raw === 0 || raw === 1) value = raw;
+    } else if (source.count) {
+      max = source.max;
+      from = "Count in the inventory";
+      if (p.fields.has(source.count)) value = Math.min(Math.max(p.int(source.count), 0), max);
+    } else if (source.hearts) {
+      max = source.hearts;
+      from = "Maximum hearts";
+      value = Math.min(Math.max(Math.floor(slot.vitals.maxHearts), 0), max);
+    } else if (source.magic) {
+      from = "Magic meter";
+      value = Number(slot.vitals.maxMagic >= source.magic);
+    }
+    return { group, label, from, value, max };
+  }));
+}
+
+// Share of each group, and overall, as the mean of the objectives' shares:
+// 37 of 100 Gold Skulltula Tokens count as 0.37 of one objective.
+function checklistSummary(entries) {
+  const share = list => {
+    const known = list.filter(entry => entry.value !== null);
+    const done = known.reduce((sum, entry) => sum + entry.value / entry.max, 0);
+    return { done: known.filter(entry => entry.value === entry.max).length, total: known.length,
+      percent: known.length ? Math.floor(done / known.length * 100) : 0 };
+  };
+  return { overall: share(entries),
+    groups: checklistGroups.map(({ label }) => ({ label, ...share(entries.filter(entry => entry.group === label)) })) };
+}
+
 function initialize() {
   const get = id => document.getElementById(id);
   const status = get('status');
@@ -1082,6 +1202,7 @@ function initialize() {
   let flagPage = 0;
   let imageUrl;
   let revision = 0;
+  let savedChecklist = [];
   const perPage = 80;
 
   for (const w of wallets) wallet.add(new Option(w.label + ' · ' + w.limit, w.id));
@@ -1167,6 +1288,58 @@ function initialize() {
     get('pending').textContent = inventoryAdditions.size + " to add · " + inventoryRemovals.size +
       " to remove · " + clearAcquisitions.size + " acquisition resets · " + flagChanges.size + " flag changes";
     result.textContent = '';
+    showChecklist();
+  }
+  function currentChanges() {
+    return {
+      wallet: wallet.value, rupees: get('rupees').valueAsNumber,
+      vitals: {
+        hearts: get('hearts').valueAsNumber, maxHearts: get('max-hearts').valueAsNumber,
+        magic: get('magic').valueAsNumber, maxMagic: Number(maxMagicSelect.value),
+      },
+      swimDepth: get('swim-depth').valueAsNumber,
+      amounts: inputAmounts(), upgrades: inputUpgrades(), bottles: get('bottles').valueAsNumber,
+      additions: inventoryAdditions, removals: inventoryRemovals, clearAcquisitions, flags: flagChanges,
+    };
+  }
+  // The checklist shows the save as it would be after exporting the pending
+  // edits. While an edit is invalid, it shows the opened save instead.
+  function showChecklist() {
+    let entries = savedChecklist;
+    let note = '';
+    try {
+      entries = progressChecklist(readSlot(...updateSlot(state, currentChanges(), editable)), catalog);
+    } catch (error) {
+      note = "Showing the opened save until the pending edits are valid: " + error.message;
+    }
+    get('checklist-note').textContent = note;
+    get('checklist-note').hidden = !note;
+    const summary = checklistSummary(entries);
+    get('checklist-summary').replaceChildren(...[{ label: "All objectives", ...summary.overall }, ...summary.groups]
+      .map(({ label, done, total, percent }) => {
+        const card = element('div', '');
+        card.className = 'progress-card';
+        const meter = document.createElement('meter');
+        meter.max = 100;
+        meter.value = percent;
+        card.append(element('span', label), element('strong', percent + '%'), element('small', done + " of " + total + " done"), meter);
+        return card;
+      }));
+    get('checklist-total').textContent = summary.overall.percent + "% of the checklist";
+    const search = get('checklist-filter').value.trim().toLowerCase();
+    const incomplete = get('checklist-incomplete').checked;
+    // Objectives that pending edits change are highlighted.
+    const changed = new Set();
+    const rows = entries.flatMap((entry, i) => {
+      if (incomplete && entry.value === entry.max) return [];
+      if (![entry.label, entry.group, entry.from].join(' ').toLowerCase().includes(search)) return [];
+      const status = entry.value === null ? "Not in this save"
+        : entry.max > 1 ? entry.value + " / " + entry.max : entry.value ? "Done" : "Missing";
+      const row = [entry.label, entry.group, status, entry.from];
+      if (entry.value !== savedChecklist[i]?.value) changed.add(row);
+      return [row];
+    });
+    tableRows('checklist-rows', rows.length ? rows : [["No matches", '—', '—', '—']], row => changed.has(row));
   }
   function updateLimits() {
     const w = wallets.find(w => w.id === wallet.value);
@@ -1353,10 +1526,13 @@ function initialize() {
       ["Hearts", state.vitals.hearts + ' / ' + state.vitals.maxHearts],
       ["Magic", state.vitals.magic + ' / ' + state.vitals.maxMagic + ' MP'],
       ["Gold Skulltulas", p.int(0x04735978)],
+      ["Checklist", ''],
       ["Equipped", [p.string(0xA95A3521, 64), p.string(0xEE463235, 64)].filter(Boolean).join(' / ') || '—'],
       ['Position X / Y / Z', fieldValue(p, 0xC884818D, 'Vector3')],
     ];
     get('overview').replaceChildren(...rows.flatMap(([label, value]) => [element('dt', label), element('dd', value)]));
+    get('overview').querySelectorAll('dd')[rows.findIndex(([label]) => label === "Checklist")].id = 'checklist-total';
+    savedChecklist = progressChecklist(state, catalog);
     const image = captionImage(c);
     if (imageUrl) URL.revokeObjectURL(imageUrl);
     imageUrl = image ? URL.createObjectURL(image) : undefined;
@@ -1539,6 +1715,10 @@ function initialize() {
   get('fill-magic').addEventListener('click', () => { get('magic').value = maxMagicSelect.value; });
   get('reset').addEventListener('click', reset);
   get('item-filter').addEventListener('input', inventory);
+  get('edit').addEventListener('input', showChecklist);
+  get('edit').addEventListener('change', showChecklist);
+  get('checklist-filter').addEventListener('input', showChecklist);
+  get('checklist-incomplete').addEventListener('change', showChecklist);
   get('item-status').addEventListener('change', inventory);
   const filterFlags = () => { flagPage = 0; flags(); };
   get('flag-filter').addEventListener('input', filterFlags);
@@ -1566,17 +1746,7 @@ function initialize() {
     result.textContent = '';
     const current = revision;
     try {
-      const changes = {
-        wallet: wallet.value, rupees: get('rupees').valueAsNumber,
-        vitals: {
-          hearts: get('hearts').valueAsNumber, maxHearts: get('max-hearts').valueAsNumber,
-          magic: get('magic').valueAsNumber, maxMagic: Number(maxMagicSelect.value),
-        },
-        swimDepth: get('swim-depth').valueAsNumber,
-        amounts: inputAmounts(), upgrades: inputUpgrades(), bottles: get('bottles').valueAsNumber,
-        additions: inventoryAdditions, removals: inventoryRemovals, clearAcquisitions, flags: flagChanges,
-      };
-      const after = updateSlot(state, changes, editable);
+      const after = updateSlot(state, currentChanges(), editable);
       const edits = slotEdits(active, state, after);
       const language = Number(voiceSelect.value);
       if (options && language !== options.language) {

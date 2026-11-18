@@ -9,12 +9,23 @@ Original editor by [Traiver](https://github.com/Traiver/OOT-SW2SE) and upstream 
 - Edit rupees, hearts, magic, the swim depth & more.
 - Change item quantities, bottles, small keys, and bag or quiver capacity.
 - Add missing items, including masks, with their acquisition flags set automatically.
+- Track progress with a checklist of dungeons, songs, quest items, items, equipment, upgrades and collectibles, with the share done per category and overall. It follows pending edits. See [Checklist](#checklist).
 - Remove supported owned single items, optionally clearing their mapped acquisition flags. Acquisition history is kept by default; story and quest progress are not reset. Unequip weapons and shields in both eras first. Default clothes, quantities, and capacity upgrades use their own controls rather than inventory removal.
 - Export replacement files as a ZIP or to a new patch folder on Windows, macOS and Linux. Export names include a UTC timestamp followed by a UUID; replacement files sit inside a folder named with that same UTC timestamp (`yyyyMMdd_HHmmss`). Exports contain only replacement files, not a complete backup.
 - Open saves from the PC ports [Longshot](https://git.magicbean.dev/MagicBeanDev/LongshotLauncher) and [Project ReLink](https://github.com/pixl27/ProjectReLink) and the emulators [Lichii](https://github.com/zortos293/Lichii) and [Fritchii](https://github.com/Frizti/Fritchii), and save a complete copy of the save with the edits (**Save Copy ZIP**) so the original stays as it is. See [Saves from PC ports and emulators](#saves-from-pc-ports-and-emulators).
 - Toggle progress flags and change the spoken dialogue language when `option.sav` is available.
 - Open the most recently saved slot automatically, list every slot with its in-game save time, and give exported ZIP entries the slot's save time. Backups with several slots also show a card per slot with its screenshot, save time, area, hearts, rupees and dungeon rewards; click one to open it. See [Save time: newest slot and ZIP timestamps](#save-time-newest-slot-and-zip-timestamps).
 - On Linux only: save edits straight back into the opened files, with an automatic backup of the replaced files, and more. See [Linux version](#linux-version).
+
+## Checklist
+
+The **Checklist** section lists 65 objectives the editor can read from `progress.sav`, in seven categories: the nine dungeon rewards, the twelve songs, quest items (Ocarina of Time, Master Sword, Gerudo Pass, Echo Gem, Biggoron Sword, Ganon's Castle barriers), items, equipment, upgrades (strength, scales, wallets, the largest bags and quiver, the Great Fairy gifts, the magic meters) and collectibles (Gold Skulltula Tokens out of 100, maximum hearts out of 20). Search it or show only what is still missing; the Overview shows the overall share.
+
+The checklist shows the save as it would be after exporting the pending edits: adding the Hookshot in Inventory marks it done right away, and the changed rows are highlighted. While an edit is invalid, it shows the opened save and says why.
+
+Each objective counts equally; a count counts by its share, so 37 of 100 Gold Skulltula Tokens count as 0.37 of one objective. The percentages cover these objectives only; they are not the game's own completion rate. An objective whose field is missing from a save is shown as such and left out of the totals. It only reads the save; nothing in the checklist changes it.
+
+Items come from their inventory stock, as in Inventory. Songs come from the `IsGet.Item_Melody_<song>` flags. Four of them (Epona's Song, Sun's Song, Song of Time, Prelude of Light) are not named in the catalog; their hashes were found by hashing the field names: a field's hash is the MurmurHash3 (x86, 32-bit, seed 0) of its name, for example `PlayerStatus.CurrentRupee` → `0xA77921D7`. `tests/editor.test.cjs` checks the song hashes this way.
 
 ## Linux version
 
