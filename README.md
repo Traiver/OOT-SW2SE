@@ -147,7 +147,7 @@ The editor only reads the files it opens. Close the game or emulator before you 
 
 - **Longshot:** on Longshot Launcher's **Saves** page, import from an emulator and choose another folder (the buttons are named slightly differently between launcher versions), then pick the extracted folder. The launcher backs up the current save before it replaces it.
 - **Project ReLink:** move the `<user id>` folder somewhere safe as your backup. Then copy the extracted folder into `save` and rename it to `<user id>`.
-- **Lichii, Fritchii:** move the `0400486024DEC000` folder of your profile somewhere safe as your backup. Then copy the extracted folder in its place and rename it to `0400486024DEC000`.
+- **Lichii, Fritchii:** move the `0400486024DEC000` folder of your profile somewhere safe as your backup. Then copy the extracted folder in its place and rename it to `0400486024DEC000`. In the newer layout (`account/<profile>/0400486024DEC000/0`), the slots are in the `0` folder: do the same with `0` instead (move it somewhere safe, copy the extracted folder in its place and rename it to `0`).
 
 On Linux, **Save Back** writes the edits straight into the port's save folder instead. It first keeps the files it replaces in a backup ZIP ([Save Back](linux/README.md#save-back)).
 
