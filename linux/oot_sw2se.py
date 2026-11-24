@@ -766,9 +766,16 @@ def write_backup_archive(folder: str, sources: dict[str, tuple[str, str]],
     base = f"{backup_title_id(sources)}_{slot_label(list(originals))}_{time.strftime('%y%m%d_%H%M%S')}"
     path = os.path.join(folder, base + ".zip")
     number = 1
-    while os.path.lexists(path):
-        number += 1
-        path = os.path.join(folder, f"{base}_{number}.zip")
+    # The name is reserved by creating it exclusively, so a second editor saving in the same second can't pick it too
+    # and replace this ZIP; the finished ZIP then replaces the empty reservation.
+    while True:
+        try:
+            os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            break
+        except FileExistsError:
+            number += 1
+            path = os.path.join(folder, f"{base}_{number}.zip")
+    reserved = path
     info = {
         "titleId": backup_title_id(sources),
         "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -788,11 +795,12 @@ def write_backup_archive(folder: str, sources: dict[str, tuple[str, str]],
             raw.flush()
             os.fsync(raw.fileno())
         os.replace(temp, path)
-        temp = ""
+        temp = reserved = ""
     finally:
-        if temp:
-            with contextlib.suppress(OSError):
-                os.unlink(temp)
+        for leftover in (temp, reserved):
+            if leftover:
+                with contextlib.suppress(OSError):
+                    os.unlink(leftover)
     return path
 
 
@@ -941,17 +949,31 @@ class EditorHost:
         if folder is None:
             raise HostError("No folder for backups could be created. Nothing was saved.")
         archive = write_backup_archive(folder, sources, originals)
-        written = []
+        written: list[str] = []
         for path, data in new.items():
             file, _, info = originals[path]
             try:
-                write_file_atomically(file, data, stat.S_IMODE(info.st_mode))
+                # A save file that is a symbolic link was read through the link, so it is written to its target:
+                # replacing the link itself would leave the save the game reads unchanged.
+                write_file_atomically(os.path.realpath(file), data, stat.S_IMODE(info.st_mode))
             except OSError as error:
-                raise HostError(f"Saving {file} failed: {describe_os_error(error)}. The files as they were "
+                # Put back the files already replaced, so the save is never left half edited (new slot files
+                # with an old manifest, say).
+                kept = []
+                for done in written:
+                    done_file, before, done_info = originals[done]
+                    try:
+                        write_file_atomically(os.path.realpath(done_file), before, stat.S_IMODE(done_info.st_mode))
+                        sources[done] = (done_file, hashlib.sha256(before).hexdigest())
+                    except OSError:
+                        kept.append(done_file)
+                state = ("Nothing was changed." if not kept
+                         else "These files could not be put back and keep the edits: " + ", ".join(kept) + ".")
+                raise HostError(f"Saving {file} failed: {describe_os_error(error)}. {state} The files as they were "
                                 f"before are kept in {archive}.") from error
             sources[path] = (file, hashlib.sha256(data).hexdigest())
-            written.append(file)
-        return {"backup": archive, "files": written}
+            written.append(path)
+        return {"backup": archive, "files": [originals[path][0] for path in written]}
 
     def _export_start(self) -> str | None:
         return self.last_export_folder or self.last_folder
@@ -1020,6 +1042,11 @@ class Lifetime:
                 self._busy -= 1
                 if not self._tabs:
                     self._empty_since = clock()
+
+    def idle(self) -> bool:
+        """True when no request is running."""
+        with self._lock:
+            return not self._busy
 
     def exit_reason(self, now: float) -> str | None:
         """Why the server should exit now, or None to keep running."""
@@ -1610,6 +1637,8 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(0.5)
             if window is not None and window.returncode() is not None:
                 if lifetime.started:
+                    if not lifetime.idle():
+                        continue  # A request (a Save Back writing files, say) runs: exit once it is done.
                     print("The editor window was closed. Exiting.", flush=True)
                     break
                 if window.returncode() != 0:

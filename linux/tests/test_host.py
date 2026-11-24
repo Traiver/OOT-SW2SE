@@ -278,6 +278,27 @@ class BackupReaderTests(TempDirTest):
         with self.assertRaisesRegex(host.HostError, "exceed"):
             host.BackupReader.read(folder)
 
+    def test_a_recovery_zip_never_replaces_another(self) -> None:
+        # Two editors saving the same slot in the same second pick the same name; the second one used to check that
+        # the name was free and then replace whatever was there by then.
+        original = os.path.join(self.root, "real.sav")
+        write(original, SAVE + b"original")
+        info = os.stat(original)
+        sources = {"Backup/files/slot_05/progress.sav": (original, "")}
+        originals = {"Backup/files/slot_05/progress.sav": (original, SAVE + b"original", info)}
+        folder = os.path.join(self.root, "backups")
+        os.mkdir(folder)
+        with mock.patch.object(host.time, "strftime", return_value="261124_120000"):
+            first = host.write_backup_archive(folder, sources, originals)
+            with open(first, "rb") as file:
+                before = file.read()
+            with mock.patch.object(host.os.path, "lexists", return_value=False):  # the other editor's check
+                second = host.write_backup_archive(folder, sources, originals)
+        self.assertNotEqual(first, second)
+        with open(first, "rb") as file:
+            self.assertEqual(file.read(), before, "the first ZIP is untouched")
+        self.assertEqual(sorted(os.listdir(folder)), sorted(map(os.path.basename, (first, second))))
+
     def test_symlinked_files_are_followed(self) -> None:
         source = os.path.join(self.root, "real")
         save_pair(source)
@@ -726,6 +747,44 @@ class SaveBackTests(TempDirTest):
         reply = self.host.handle({"id": 3, "action": "saveBack", "tab": "tab-c", "files": edit})
         self.assertEqual(reply["error"], "Open a backup first.")
 
+    def test_a_failed_write_puts_back_the_files_already_replaced(self) -> None:
+        # progress.sav is written, then caption.sav fails: progress.sav must get its old bytes back, the message
+        # must say nothing changed, and the next Save Back must still pass the "changed since opened" check.
+        self.open(self.saves)
+        progress = os.path.join(self.saves, "slot_05", "progress.sav")
+        real_write = host.write_file_atomically
+        calls = []
+
+        def failing_second(path, data, mode=0o644):
+            calls.append(path)
+            if len(calls) == 2:
+                raise OSError(28, "No space left on device")
+            return real_write(path, data, mode)
+        with mock.patch.object(host, "write_file_atomically", failing_second):
+            with self.assertRaisesRegex(host.HostError, "Nothing was changed"):
+                self.save_back({"Backup/files/slot_05/progress.sav": SAVE + b"edited",
+                                "Backup/files/slot_05/caption.sav": SAVE + b"edited caption"})
+        with open(progress, "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"progress slot_05", "progress.sav was put back")
+        self.save_back({"Backup/files/slot_05/progress.sav": SAVE + b"edited again"})
+        with open(progress, "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"edited again")
+
+    def test_a_symlinked_save_is_written_to_its_target(self) -> None:
+        # The reader follows links, so Save Back must write the target, not replace the link with a copy.
+        real = os.path.join(self.root, "real")
+        os.mkdir(real)
+        folder = os.path.join(self.root, "links", "slot_03")
+        os.makedirs(folder)
+        for name in ("progress.sav", "caption.sav"):
+            write(os.path.join(real, name), SAVE + b"real " + name.encode())
+            os.symlink(os.path.join(real, name), os.path.join(folder, name))
+        self.open(folder)
+        self.save_back({"Backup/files/slot_03/progress.sav": SAVE + b"edited through the link"})
+        self.assertTrue(os.path.islink(os.path.join(folder, "progress.sav")), "the link is still a link")
+        with open(os.path.join(real, "progress.sav"), "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"edited through the link")
+
     def test_only_opened_and_valid_files_are_accepted(self) -> None:
         with self.assertRaisesRegex(host.HostError, "Open a backup first"):
             self.save_back({"Backup/files/slot_05/progress.sav": SAVE})
@@ -908,6 +967,42 @@ class AppWindowTests(TempDirTest):
         self.assertIn("loaded chromium True", log)
         self.assertFalse([line for line in log if line.startswith("xdg-open")], "no tab was opened")
         self.assertEqual(os.listdir(self.tmp), [], "the temporary profile was removed")
+
+    def test_closing_the_window_waits_for_a_running_request(self) -> None:
+        # The window is closed while a request (a Save Back writing files, say) still runs: the editor must exit only
+        # once the request is done, or the save can be left half written.
+        done = threading.Event()
+
+        class BusyLifetime(host.Lifetime):
+            started = True
+
+            def idle(self) -> bool:
+                return done.is_set()
+
+        class ClosedWindow:
+            browser = "chromium"
+
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            def open(self, url: str) -> bool:
+                return True
+
+            def returncode(self) -> int:
+                return 0
+
+            def close(self) -> None:
+                pass
+        settings = host.Settings([os.path.join(self.root, "config")])
+        timer = threading.Timer(1.5, done.set)
+        with mock.patch.object(host, "find_app_browser", return_value="chromium"), \
+                mock.patch.object(host, "AppWindow", ClosedWindow), mock.patch.object(host, "Lifetime", BusyLifetime), \
+                mock.patch.object(host, "Settings", return_value=settings), mock.patch.object(host.signal, "signal"), \
+                mock.patch("builtins.print"):
+            start = host.time.monotonic()
+            timer.start()
+            self.assertEqual(host.main([]), 0)
+        self.assertGreaterEqual(host.time.monotonic() - start, 1.4, "main waited for the request")
 
     def test_failed_app_window_falls_back_to_a_tab(self) -> None:
         self.fake("chromium", "xdg-open")
