@@ -775,15 +775,15 @@ def write_backup_archive(folder: str, sources: dict[str, tuple[str, str]],
         except FileExistsError:
             number += 1
             path = os.path.join(folder, f"{base}_{number}.zip")
-    reserved = path
-    info = {
-        "titleId": backup_title_id(sources),
-        "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-        "createdBy": f"{APP_NAME} for Linux (Save Back)",
-        "files": {archive_name(relative): file for relative, (file, _, _) in originals.items()},
-    }
-    descriptor, temp = tempfile.mkstemp(prefix=".oot-backup-", suffix=".tmp", dir=folder)
-    try:
+    reserved, temp = path, ""
+    try:  # from here on, a failure removes the reservation (and the temporary file, once there is one)
+        info = {
+            "titleId": backup_title_id(sources),
+            "created": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "createdBy": f"{APP_NAME} for Linux (Save Back)",
+            "files": {archive_name(relative): file for relative, (file, _, _) in originals.items()},
+        }
+        descriptor, temp = tempfile.mkstemp(prefix=".oot-backup-", suffix=".tmp", dir=folder)
         with os.fdopen(descriptor, "wb") as raw:
             with zipfile.ZipFile(raw, "w", zipfile.ZIP_DEFLATED) as archive:
                 for relative, (_, data, file_info) in originals.items():
@@ -934,10 +934,14 @@ class EditorHost:
             new[path] = data
 
         originals: dict[str, tuple[str, bytes, os.stat_result]] = {}
+        # Where each file is written: a save file that is a symbolic link is resolved once, here, and its target is
+        # what is checked, backed up and written, so a link changed meanwhile can't send the write elsewhere.
+        targets: dict[str, str] = {}
         for path in new:
             file, digest = sources[path]
+            targets[path] = os.path.realpath(file)
             try:
-                current, info = read_current(file)
+                current, info = read_current(targets[path])
             except OSError as error:
                 raise HostError(f"{file} could not be read: {describe_os_error(error)}. Nothing was saved.") from error
             if hashlib.sha256(current).hexdigest() != digest:
@@ -953,9 +957,9 @@ class EditorHost:
         for path, data in new.items():
             file, _, info = originals[path]
             try:
-                # A save file that is a symbolic link was read through the link, so it is written to its target:
-                # replacing the link itself would leave the save the game reads unchanged.
-                write_file_atomically(os.path.realpath(file), data, stat.S_IMODE(info.st_mode))
+                # Written to the resolved target: replacing a symbolic link itself would leave the save the game
+                # reads unchanged.
+                write_file_atomically(targets[path], data, stat.S_IMODE(info.st_mode))
             except OSError as error:
                 # Put back the files already replaced, so the save is never left half edited (new slot files
                 # with an old manifest, say).
@@ -963,7 +967,7 @@ class EditorHost:
                 for done in written:
                     done_file, before, done_info = originals[done]
                     try:
-                        write_file_atomically(os.path.realpath(done_file), before, stat.S_IMODE(done_info.st_mode))
+                        write_file_atomically(targets[done], before, stat.S_IMODE(done_info.st_mode))
                         sources[done] = (done_file, hashlib.sha256(before).hexdigest())
                     except OSError:
                         kept.append(done_file)

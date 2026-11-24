@@ -298,6 +298,11 @@ class BackupReaderTests(TempDirTest):
         with open(first, "rb") as file:
             self.assertEqual(file.read(), before, "the first ZIP is untouched")
         self.assertEqual(sorted(os.listdir(folder)), sorted(map(os.path.basename, (first, second))))
+        # A failure after the name is reserved (no room for the temporary file, say) leaves no empty ZIP behind.
+        with mock.patch.object(host.tempfile, "mkstemp", side_effect=OSError(28, "No space left on device")):
+            with self.assertRaises(OSError):
+                host.write_backup_archive(folder, sources, originals)
+        self.assertEqual(sorted(os.listdir(folder)), sorted(map(os.path.basename, (first, second))))
 
     def test_symlinked_files_are_followed(self) -> None:
         source = os.path.join(self.root, "real")
