@@ -410,4 +410,15 @@ test('pending edits show up in the checklist the way they would be exported', ()
   assert.equal(objective(api.progressChecklist(before, catalog), "Hookshot").value, 0);
 });
 
+test('every field name in the catalog is the name its hash was made from', () => {
+  // A name is shown, searched and decides which Bool flags are editable, so it must be the field's real name: a label
+  // ("Deku Nut Limit") or a guess would put a wrong name on the field.
+  const named = catalog.fields.filter(field => field.length > 2);
+  assert.ok(named.length > 9000, named.length + ' named fields');
+  const wrong = named.filter(([hash, , name]) => murmur3(name) !== hash).map(([hash, , name]) => HEXS(hash) + ' ' + name);
+  assert.deepEqual(wrong, []);
+});
+
+function HEXS(hash) { return '0x' + hash.toString(16).toUpperCase().padStart(8, '0'); }
+
 module.exports = { fixture };
