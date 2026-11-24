@@ -1780,9 +1780,12 @@ function initialize() {
         // files without it would leave the backup inconsistent.
         if (manifestSource && !manifest) throw Error("The backup manifest could not be updated. Nothing was saved.");
         const files = saveBackEntries(active, backup, edits, manifest);
+        const issued = backup;
         const saved = await desktop.saveBack(files);
+        // The files are written now, even if another slot or backup was opened meanwhile: the opened backup they
+        // came from must hold the new bytes, or reselecting its slot would show (and save from) the old ones.
+        replaceOpenedFiles(issued, files);
         if (current !== revision) return;
-        replaceOpenedFiles(backup, files);
         await loadSlot(active);
         get('export-section').scrollIntoView({ block: 'start' });
         result.textContent = "Saved " + active.id + " back to the opened files. The previous files are kept in " +
