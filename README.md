@@ -47,7 +47,7 @@ The Linux version, Save Back and the save-time features below were written by au
 
 ## Web version
 
-[`web/`](web/) adds a web version: the same, unchanged editor in a web browser, with nothing to install. The browser's own file pickers open the save and save the patch; nothing is uploaded. Run it as a small container image (`docker run --rm -p 8080:8080 ghcr.io/traiver/oot-sw2se:latest`, then open <http://localhost:8080>) or put the files from a release's `OOT-SW2SE-<version>-web.zip` on any web server. See [`web/README.md`](web/README.md) for what works in which browser, building and how it works.
+[`web/`](web/) adds a web version: the same, unchanged editor in a web browser, with nothing to install. The browser's own file pickers open the save and save the patch; nothing is uploaded. Run it as a small container image (`docker run --rm -p 8080:8080 ghcr.io/traiver/oot-sw2se:edge` until the first release, `:latest` after it, then open <http://localhost:8080>) or put the files from a release's `OOT-SW2SE-<version>-web.zip` on any web server. See [`web/README.md`](web/README.md) for what works in which browser, building and how it works.
 
 ## Save time: newest slot and ZIP timestamps
 
