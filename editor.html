@@ -1757,7 +1757,9 @@ function initialize() {
       let manifest;
       if (manifestSource) {
         try {
-          manifest = await patchManifest(manifestSource, edits);
+          // The manifest as the opened backup holds it now, not as it was when this slot loaded: a Save Back of
+          // another slot in the meantime changed that slot's hashes in it.
+          manifest = await patchManifest(await backup.manifest.text(), edits);
           entries.push(['manifest.json', manifest]);
         } catch (error) {
           message += " Manifest skipped. " + error.message;
