@@ -486,10 +486,12 @@ function readSave(bytes, headerEnd) {
 function readSlot(progress, caption) {
   const p = readSave(progress, 0x175D8);
   const c = readSave(caption, 0x2A0);
-  const w = wallets.find(w => w.id === p.string(key.wallet, 64));
-  if (!w || p.int(key.limit) !== w.limit || p.int(w.stock) !== 1) {
+  const wallet = wallets.find(w => w.id === p.string(key.wallet, 64));
+  const limit = p.int(key.limit);
+  if (!wallet || limit < 1 || p.int(wallet.stock) !== 1) {
     throw Error("The wallet, ownership flag, and rupee limit are inconsistent.");
   }
+  const w = limit === wallet.limit ? wallet : { ...wallet, limit };
   const rupees = p.int(key.rupees);
   if (rupees < 0) throw Error("Unexpected rupee count in progress.sav.");
   c.at(key.previewRupees);
@@ -726,19 +728,32 @@ function writeVitals(slot, p, c, vitals) {
   }
 }
 
+// Keep a custom saved limit unless a standard wallet is explicitly selected.
+function walletOptions(slot) {
+  return wallets.flatMap(wallet => {
+    if (wallet.id !== slot.w.id || wallet.limit === slot.w.limit) {
+      return [{ ...wallet, value: wallet.id }];
+    }
+    return [
+      { ...slot.w, value: wallet.id, label: wallet.label + ' (saved custom limit)' },
+      { ...wallet, value: 'vanilla:' + wallet.id },
+    ];
+  });
+}
+
 function updateSlot(slot, changes, editCatalog) {
-  const wallet = wallets.find(w => w.id === changes.wallet);
+  const wallet = walletOptions(slot).find(w => w.value === changes.wallet);
   if (!wallet) throw Error("Unknown wallet.");
   const rupees = checkedInt(changes.rupees, wallet.limit, "Rupees");
   const p = readSave(slot.p.bytes.slice(), 0x175D8);
   const c = readSave(slot.c.bytes.slice(), 0x2A0);
   const set = (save, hash, value) => save.view.setInt32(save.at(hash), value, true);
-  if (wallet !== slot.w) {
+  if (wallet.id !== slot.w.id || wallet.limit !== slot.w.limit) {
     const o = p.block(key.wallet, 64);
     p.bytes.fill(0, o, o + 64);
     p.bytes.set(utf8.encode(wallet.id), o);
     set(p, key.limit, wallet.limit);
-    for (const w of wallets) set(p, w.stock, Number(w === wallet));
+    for (const w of wallets) set(p, w.stock, Number(w.id === wallet.id));
   }
   set(p, key.rupees, rupees);
   set(c, key.previewRupees, rupees);
@@ -1205,7 +1220,6 @@ function initialize() {
   let savedChecklist = [];
   const perPage = 80;
 
-  for (const w of wallets) wallet.add(new Option(w.label + ' · ' + w.limit, w.id));
   for (const [value, label] of voiceLanguages) voiceSelect.add(new Option(label, String(value)));
   const element = (tag, text) => {
     const el = document.createElement(tag);
@@ -1341,10 +1355,15 @@ function initialize() {
     });
     tableRows('checklist-rows', rows.length ? rows : [["No matches", '—', '—', '—']], row => changed.has(row));
   }
-  function updateLimits() {
-    const w = wallets.find(w => w.id === wallet.value);
-    get('rupees').max = w.limit;
-    get('limits').textContent = 'Limit · ' + w.limit + " rupees.";
+  function updateLimits(clamp = false) {
+    const w = walletOptions(state).find(w => w.value === wallet.value);
+    const rupees = get('rupees');
+    rupees.max = w.limit;
+    if (clamp && rupees.valueAsNumber > w.limit) rupees.value = w.limit;
+    const custom = w.limit !== wallets.find(standard => standard.id === w.id).limit;
+    get('limits').textContent = 'Limit · ' + w.limit + " rupees." + (custom
+      ? " Saved custom limit is preserved. Select a standard wallet to restore its normal capacity; excess rupees will be reduced."
+      : '');
   }
   function updateVitalLimits() {
     get('hearts').max = get('max-hearts').value;
@@ -1352,6 +1371,7 @@ function initialize() {
     get('fill-magic').disabled = Number(maxMagicSelect.value) === 0;
   }
   function reset() {
+    wallet.replaceChildren(...walletOptions(state).map(w => new Option(w.label + ' · ' + w.limit, w.value)));
     wallet.value = state.w.id;
     get('rupees').value = state.rupees;
     const vitals = state.vitals;
@@ -1709,7 +1729,7 @@ function initialize() {
     const slot = backup.slots.find(slot => slot.id === slotSelect.value);
     if (slot) return loadSlot(slot);
   });
-  wallet.addEventListener('change', updateLimits);
+  wallet.addEventListener('change', () => updateLimits(true));
   get('max-hearts').addEventListener('input', updateVitalLimits);
   maxMagicSelect.addEventListener('change', updateVitalLimits);
   get('fill-magic').addEventListener('click', () => { get('magic').value = maxMagicSelect.value; });
