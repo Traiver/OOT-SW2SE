@@ -46,7 +46,7 @@ Use Node.js 20 or later; no other build tools are needed. From a terminal in thi
 node web/build.mjs
 ```
 
-The script places `web/dist/index.html`, the same `editor.html` unchanged except for the added browser host (`web/browser-host.js`) and the version from `Program.cs`, with `favicon.ico` and `LICENSE.txt` in `web/dist`. Serve the folder from any web server or open `index.html` from disk.
+The script places `web/dist/index.html`, the same `editor.html` unchanged except for the added browser host (`web/browser-host.js`) and the version from `Program.cs`, with `favicon.ico` and `LICENSE.txt` in `web/dist`. Serve the folder from any web server or open `index.html` from disk. A server on another machine must use HTTPS (a reverse proxy is fine): browsers only allow the folder pickers and the exports on secure pages, that is HTTPS, `localhost` or a file opened from disk.
 
 `docker build -f web/Dockerfile -t oot-sw2se-web .` builds a container image that runs the tests, then serves the page with static-web-server on port 8080. GitHub Actions builds it for amd64 and arm64 ([`.github/workflows/web.yml`](.github/workflows/web.yml)), pushes it to `ghcr.io/<owner>/oot-sw2se` (`:edge` from the main branch; `:latest` and `:<version>` from releases) and attaches the page to releases as `OOT-SW2SE-<version>-web.zip`. See [`web/README.md`](web/README.md).
 
