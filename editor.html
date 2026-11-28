@@ -216,6 +216,9 @@ meter { display: block; width: 100%; height: 8px; margin-top: 6px; }
       <h3>Inventory Quantities</h3>
       <div id="amounts" class="grid"></div>
       <p id="capacity-notice" class="muted" aria-live="polite"></p>
+      <h3>Gauntlets</h3>
+      <div class="grid"><label>Active Gauntlets<select id="hand-armor"></select></label></div>
+      <p class="muted">Select owned gauntlets, or add them in Inventory before exporting. Re-equip Golden Gauntlets here if collecting Silver Gauntlets later replaced the active equipment.</p>
       <h3>Bottles</h3>
       <div class="grid"><label>Bottle Count<input id="bottles" type="number" min="0" max="5" step="1" required></label></div>
       <p id="bottle-info" class="muted"></p>
@@ -430,6 +433,12 @@ const bottleContents = new Map([
   [0x74D62ECB, "bug"], [0x6F49E357, "fairy"], [0x73356827, "milk"], [0xEEF6E4B0, "half milk"],
 ]);
 const quantityFields = [...supplies, ...smallKeys];
+const handArmorField = 0x7CE1CB81; // MurmurHash3 of PlayerStatus.EquipHandArmor.
+const handArmorOptions = [
+  { id: 'Armor_Adult_Gauntlet_Silver', stock: 0x0012B8C0, label: "Silver Gauntlets" },
+  { id: 'Armor_Adult_Gauntlet_Gold', stock: 0x40AE1183, label: "Golden Gauntlets" },
+];
+
 const key = { rupees: 0xA77921D7, limit: 0xE0010A50, wallet: 0x3E42AFFA, previewRupees: 0xA9557547,
   diveDepth: 0x61466C21 };
 const vitalsFields = [
@@ -798,6 +807,15 @@ function updateSlot(slot, changes, editCatalog) {
       throw Error("This flag cannot be edited here: " + HEX(hash));
     }
     set(p, hash, Number(checked));
+  }
+  if (changes.handArmor) {
+    const armor = handArmorOptions.find(item => item.id === changes.handArmor);
+    if (!armor || p.int(armor.stock) !== 1) {
+      throw Error("The selected gauntlets must be owned after the inventory edits.");
+    }
+    const offset = p.block(handArmorField, 64);
+    p.bytes.fill(0, offset, offset + 64);
+    p.bytes.set(utf8.encode(armor.id), offset);
   }
   readSlot(p.bytes, c.bytes);
   return [p.bytes, c.bytes];
@@ -1306,6 +1324,7 @@ function initialize() {
   }
   function currentChanges() {
     return {
+      handArmor: get('hand-armor').value,
       wallet: wallet.value, rupees: get('rupees').valueAsNumber,
       vitals: {
         hearts: get('hearts').valueAsNumber, maxHearts: get('max-hearts').valueAsNumber,
@@ -1374,6 +1393,14 @@ function initialize() {
     wallet.replaceChildren(...walletOptions(state).map(w => new Option(w.label + ' · ' + w.limit, w.value)));
     wallet.value = state.w.id;
     get('rupees').value = state.rupees;
+    const handArmor = get('hand-armor');
+    const hasHandArmor = state.p.fields.has(handArmorField);
+    const savedHandArmor = hasHandArmor ? state.p.string(handArmorField, 64) : '';
+    const savedLabel = handArmorOptions.find(item => item.id === savedHandArmor)?.label || savedHandArmor || 'none';
+    handArmor.replaceChildren(new Option(hasHandArmor ? "Keep saved equipment · " + savedLabel : "Not in this save", ''),
+      ...handArmorOptions.map(item => new Option(item.label, item.id)));
+    handArmor.value = '';
+    handArmor.disabled = !hasHandArmor;
     const vitals = state.vitals;
     get('max-hearts').value = vitals.maxHearts;
     get('hearts').value = vitals.hearts;
