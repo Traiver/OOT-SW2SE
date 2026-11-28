@@ -7,7 +7,7 @@ const catalog = JSON.parse(html.match(/<script id="catalog" type="application\/j
 const context = vm.createContext({ TextEncoder, TextDecoder, Blob, crypto: require('node:crypto').webcrypto,
   window: { chrome: { webview: { addEventListener() {}, postMessage() {} } } } });
 vm.runInContext(html.match(/<script>\s*('use strict';.*?)<\/script>/s)[1], context);
-const api = vm.runInContext('({readSlot, updateSlot, editOptions, removalIssue, acquisitionFlags, zip, exportLayout, saveTime, formatSaveTime, newestSlot, saveBackEntries, replaceOpenedFiles, progressChecklist, checklistSummary, checklistGroups})', context);
+const api = vm.runInContext('({readSlot, walletOptions, updateSlot, editOptions, removalIssue, acquisitionFlags, zip, exportLayout, saveTime, formatSaveTime, newestSlot, saveBackEntries, replaceOpenedFiles, progressChecklist, checklistSummary, checklistGroups})', context);
 const editable = api.editOptions(catalog);
 const item = name => catalog.inventory.find(row => row[1] === name)[0];
 const registration = hash => catalog.registrations.find(([stocks]) => stocks.includes(hash));
@@ -411,3 +411,75 @@ test('pending edits show up in the checklist the way they would be exported', ()
 });
 
 module.exports = { fixture };
+
+
+test('custom wallet limits load and survive unrelated edits without mutating the source', () => {
+  const f = fixture();
+  f.set(0xE0010A50, 9999);
+  f.set(0xA77921D7, 1107);
+  const slot = f.slot();
+  slot.c.view.setInt32(slot.c.at(0xA9557547), 1107, true);
+  const before = Buffer.from(f.p);
+  assert.equal(slot.w.limit, 9999);
+  const options = api.walletOptions(slot);
+  assert.equal(options.find(w => w.value === slot.w.id).limit, 9999);
+  assert.equal(options.find(w => w.value === 'vanilla:' + slot.w.id).limit, 200);
+  const after = edit(f, { rupees: 9999 });
+  assert.equal(after.w.limit, 9999);
+  assert.equal(after.rupees, 9999);
+  assert.equal(after.c.int(0xA9557547), 9999);
+  assert.deepEqual(Buffer.from(f.p), before);
+  assert.throws(() => edit(f, { rupees: 10000 }), /Rupees/);
+  const unchanged = edit(f, {});
+  assert.deepEqual(unchanged.p.bytes, f.p);
+  assert.deepEqual(unchanged.c.bytes, f.c);
+});
+
+test('an explicit standard wallet selection restores its capacity and ownership', () => {
+  for (const [name, stock, limit] of [
+    ['Item_Wallet_Small', 0x1D74617E, 200],
+    ['Item_Wallet_Medium', 0x2D2C874B, 500],
+    ['Item_Wallet_Large', 0xAFA4BB52, 1000],
+  ]) {
+    const f = fixture();
+    f.string(0x3E42AFFA, name);
+    f.set(stock, 1);
+    f.set(0xE0010A50, 9999);
+    f.set(0xA77921D7, 1107);
+    const restored = edit(f, { wallet: 'vanilla:' + name, rupees: limit });
+    assert.equal(restored.w.id, name);
+    assert.equal(restored.w.limit, limit);
+    assert.equal(restored.rupees, limit);
+    assert.equal(restored.c.int(0xA9557547), limit);
+    for (const [, otherStock] of [
+      ['small', 0x1D74617E], ['medium', 0x2D2C874B], ['large', 0xAFA4BB52],
+    ]) assert.equal(restored.p.int(otherStock), Number(otherStock === stock));
+    assert.throws(() => edit(f, { wallet: 'vanilla:' + name, rupees: 1107 }), /Rupees/);
+    assert.equal(f.slot().w.limit, 9999);
+  }
+});
+
+test('custom wallets can switch tiers while ordinary wallets retain their choices', () => {
+  const f = fixture();
+  f.set(0xE0010A50, 9999);
+  const after = edit(f, { wallet: 'Item_Wallet_Large', rupees: 1000 });
+  assert.equal(after.w.id, 'Item_Wallet_Large');
+  assert.equal(after.w.limit, 1000);
+  const ordinary = fixture();
+  assert.deepEqual(Array.from(api.walletOptions(ordinary.slot()), w => w.value),
+    ['Item_Wallet_Small', 'Item_Wallet_Medium', 'Item_Wallet_Large']);
+  assert.throws(() => edit(ordinary, { wallet: 'vanilla:Item_Wallet_Small' }), /Unknown wallet/);
+});
+
+test('custom limits keep malformed-wallet and invalid-rupee checks', () => {
+  for (const limit of [0, -1, -2147483648]) {
+    const f = fixture(); f.set(0xE0010A50, limit);
+    assert.throws(() => f.slot(), /wallet, ownership flag/);
+  }
+  const missing = fixture(); missing.set(0xE0010A50, 9999); missing.set(0x1D74617E, 0);
+  assert.throws(() => missing.slot(), /wallet, ownership flag/);
+  const unknown = fixture(); unknown.string(0x3E42AFFA, 'UnknownWallet');
+  assert.throws(() => unknown.slot(), /wallet, ownership flag/);
+  const negative = fixture(); negative.set(0xE0010A50, 9999); negative.set(0xA77921D7, -1);
+  assert.throws(() => negative.slot(), /Unexpected rupee count/);
+});
