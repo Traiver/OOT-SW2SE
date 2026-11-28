@@ -798,6 +798,15 @@ def write_backup_archive(folder: str, sources: dict[str, tuple[str, str]],
 
 # MARK: - Host actions
 
+TAB_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
+
+
+def tab_of(message: dict) -> str:
+    """The tab a request came from (the shim adds it to every request), or "" without a valid one."""
+    tab = message.get("tab")
+    return tab if isinstance(tab, str) and TAB_ID.fullmatch(tab) else ""
+
+
 class EditorHost:
     """Answers the page's requests, like HandleMessage in Program.cs."""
 
@@ -809,8 +818,9 @@ class EditorHost:
         # Dialogs start in the folders used last, also from earlier runs.
         self.last_folder = settings.folder("lastBackupFolder") if settings else None
         self.last_export_folder = settings.folder("lastExportFolder") if settings else None
-        # Files of the opened backup, for Save Back: relativePath -> (path, SHA-256).
-        self.sources: dict[str, tuple[str, str]] = {}
+        # Files of the backup each tab opened, for Save Back: tab -> {relativePath -> (path, SHA-256)}.
+        # Per tab, so a Save Back from one tab never writes into the backup another tab opened later.
+        self.sources_by_tab: dict[str, dict[str, tuple[str, str]]] = {}
 
     def handle(self, message: dict) -> dict:
         """Runs one request and returns {result, error} for the page."""
@@ -819,7 +829,7 @@ class EditorHost:
         try:
             action = message.get("action")
             if action == "openBackup":
-                result = self.open_backup()
+                result = self.open_backup(tab_of(message))
             elif action == "savePatch":
                 result = self.save_patch(message)
             elif action == "saveFolder":
@@ -838,7 +848,7 @@ class EditorHost:
         finally:
             self._dialog.release()
 
-    def open_backup(self) -> list[dict[str, str]] | None:
+    def open_backup(self, tab: str = "") -> list[dict[str, str]] | None:
         folder = self.dialogs.pick_folder("Select a backup or save folder", self.last_folder)
         if folder is None:
             return None
@@ -846,7 +856,7 @@ class EditorHost:
         self._remember(lastBackupFolder=folder)
         sources: dict[str, tuple[str, str]] = {}
         files = BackupReader.read(folder, sources)
-        self.sources = sources
+        self.sources_by_tab[tab] = sources
         return files
 
     def save_patch(self, message: dict) -> str | None:
@@ -883,9 +893,10 @@ class EditorHost:
         each back to where it came from, and only while it still holds what
         was read: if the game or an emulator saved in the meantime, nothing
         is written. The files about to be replaced are first stored in a ZIP
-        in the backups folder.
+        in the backups folder. The files are those the requesting tab opened.
         """
-        if not self.sources:
+        sources = self.sources_by_tab.get(tab_of(message))
+        if not sources:
             raise HostError("Open a backup first.")
         entries = message.get("files")
         if not isinstance(entries, list) or not 1 <= len(entries) <= 4:
@@ -895,7 +906,7 @@ class EditorHost:
         for entry in entries:
             path = entry.get("relativePath") if isinstance(entry, dict) else None
             contents = entry.get("contents") if isinstance(entry, dict) else None
-            if not isinstance(path, str) or path not in self.sources or path in new or \
+            if not isinstance(path, str) or path not in sources or path in new or \
                     not isinstance(contents, str) or not contents or len(contents) > 2 * MAX_FILE_BYTES:
                 raise HostError("Invalid save file.")
             try:
@@ -916,7 +927,7 @@ class EditorHost:
 
         originals: dict[str, tuple[str, bytes, os.stat_result]] = {}
         for path in new:
-            file, digest = self.sources[path]
+            file, digest = sources[path]
             try:
                 current, info = read_current(file)
             except OSError as error:
@@ -929,7 +940,7 @@ class EditorHost:
         folder = self.settings.backup_folder() if self.settings else None
         if folder is None:
             raise HostError("No folder for backups could be created. Nothing was saved.")
-        archive = write_backup_archive(folder, self.sources, originals)
+        archive = write_backup_archive(folder, sources, originals)
         written = []
         for path, data in new.items():
             file, _, info = originals[path]
@@ -938,7 +949,7 @@ class EditorHost:
             except OSError as error:
                 raise HostError(f"Saving {file} failed: {describe_os_error(error)}. The files as they were "
                                 f"before are kept in {archive}.") from error
-            self.sources[path] = (file, hashlib.sha256(data).hexdigest())
+            sources[path] = (file, hashlib.sha256(data).hexdigest())
             written.append(file)
         return {"backup": archive, "files": written}
 
@@ -1060,7 +1071,8 @@ BRIDGE_SHIM = r"""
       // tab keeps its size, and the page lays itself out for any size.
       if (!message || message.action === 'workspace') return;
       const id = message.id;
-      post('/api/request', message)
+      // The tab goes with every request: the helper keeps each tab's opened backup apart.
+      post('/api/request', { ...message, tab })
         .then(response => {
           if (!response.ok) throw new Error('The OOT SW2SE helper refused the request (HTTP ' + response.status + ').');
           return response.json();
@@ -1285,7 +1297,7 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
 
         if path == "/api/alive":
             tab = message.get("tab")
-            if not isinstance(tab, str) or not re.fullmatch(r"[A-Za-z0-9-]{1,64}", tab):
+            if not isinstance(tab, str) or not TAB_ID.fullmatch(tab):
                 return self._send(400, b"Invalid tab")
             self.server.lifetime.alive(tab, now)
             self.server.note_window(message.get("window"))

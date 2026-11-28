@@ -706,6 +706,26 @@ class SaveBackTests(TempDirTest):
             self.assertEqual(file.read(), SAVE + b"caption slot_05", "no file was written")
         self.assertEqual(self.backups(), [])
 
+    def test_each_tab_saves_back_into_the_backup_it_opened(self) -> None:
+        # Two tabs, two backups with the same slot names: tab A's edits must go into A's backup even after tab B
+        # opened B, and a tab that opened nothing can't save back at all.
+        other = os.path.join(self.root, "other", "5a3c9e1f0b7d2468")
+        write(os.path.join(other, "slot_05", "progress.sav"), SAVE + b"other progress")
+        write(os.path.join(other, "slot_05", "caption.sav"), SAVE + b"other caption")
+        for tab, folder in (("tab-a", self.saves), ("tab-b", other)):
+            self.dialogs.folder = folder
+            self.host.handle({"id": 1, "action": "openBackup", "tab": tab})
+        edit = [{"relativePath": "Backup/files/slot_05/progress.sav",
+                 "contents": base64.b64encode(SAVE + b"edited in tab A").decode()}]
+        reply = self.host.handle({"id": 2, "action": "saveBack", "tab": "tab-a", "files": edit})
+        self.assertIsNone(reply["error"])
+        with open(os.path.join(self.saves, "slot_05", "progress.sav"), "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"edited in tab A")
+        with open(os.path.join(other, "slot_05", "progress.sav"), "rb") as file:
+            self.assertEqual(file.read(), SAVE + b"other progress", "tab B's backup is untouched")
+        reply = self.host.handle({"id": 3, "action": "saveBack", "tab": "tab-c", "files": edit})
+        self.assertEqual(reply["error"], "Open a backup first.")
+
     def test_only_opened_and_valid_files_are_accepted(self) -> None:
         with self.assertRaisesRegex(host.HostError, "Open a backup first"):
             self.save_back({"Backup/files/slot_05/progress.sav": SAVE})

@@ -1804,7 +1804,9 @@ function initialize() {
       let manifest;
       if (manifestSource) {
         try {
-          manifest = await patchManifest(manifestSource, edits);
+          // The manifest as the opened backup holds it now, not as it was when this slot loaded: a Save Back of
+          // another slot in the meantime changed that slot's hashes in it.
+          manifest = await patchManifest(await backup.manifest.text(), edits);
           entries.push(['manifest.json', manifest]);
         } catch (error) {
           message += " Manifest skipped. " + error.message;
@@ -1827,9 +1829,12 @@ function initialize() {
         // files without it would leave the backup inconsistent.
         if (manifestSource && !manifest) throw Error("The backup manifest could not be updated. Nothing was saved.");
         const files = saveBackEntries(active, backup, edits, manifest);
+        const issued = backup;
         const saved = await desktop.saveBack(files);
+        // The files are written now, even if another slot or backup was opened meanwhile: the opened backup they
+        // came from must hold the new bytes, or reselecting its slot would show (and save from) the old ones.
+        replaceOpenedFiles(issued, files);
         if (current !== revision) return;
-        replaceOpenedFiles(backup, files);
         await loadSlot(active);
         get('export-section').scrollIntoView({ block: 'start' });
         result.textContent = "Saved " + active.id + " back to the opened files. The previous files are kept in " +
