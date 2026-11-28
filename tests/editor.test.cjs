@@ -483,3 +483,49 @@ test('custom limits keep malformed-wallet and invalid-rupee checks', () => {
   const negative = fixture(); negative.set(0xE0010A50, 9999); negative.set(0xA77921D7, -1);
   assert.throws(() => negative.slot(), /Unexpected rupee count/);
 });
+
+
+test('gauntlet equipment uses the verified field and preserves the saved choice by default', () => {
+  assert.equal(murmur3('PlayerStatus.EquipHandArmor'), 0x7CE1CB81);
+  const f = fixture(['Armor_Adult_Gauntlet_Silver', 'Armor_Adult_Gauntlet_Gold']);
+  f.string(0x7CE1CB81, 'Armor_Adult_Gauntlet_Silver');
+  const after = edit(f, {});
+  assert.equal(after.p.string(0x7CE1CB81, 64), 'Armor_Adult_Gauntlet_Silver');
+  assert.deepEqual(after.p.bytes, f.p);
+});
+
+test('equipping owned Golden Gauntlets changes only the active hand equipment', () => {
+  const f = fixture(['Armor_Adult_Gauntlet_Silver', 'Armor_Adult_Gauntlet_Gold']);
+  f.string(0x7CE1CB81, 'Armor_Adult_Gauntlet_Silver');
+  const before = f.slot();
+  const after = edit(f, { handArmor: 'Armor_Adult_Gauntlet_Gold' });
+  assert.equal(after.p.string(0x7CE1CB81, 64), 'Armor_Adult_Gauntlet_Gold');
+  const offset = before.p.block(0x7CE1CB81, 64);
+  assert.deepEqual(after.p.bytes.slice(0, offset), before.p.bytes.slice(0, offset));
+  assert.deepEqual(after.p.bytes.slice(offset + 64), before.p.bytes.slice(offset + 64));
+  assert.deepEqual(after.c.bytes, before.c.bytes);
+  assert.equal(f.slot().p.string(0x7CE1CB81, 64), 'Armor_Adult_Gauntlet_Silver');
+  const downgraded = api.readSlot(...api.updateSlot(after,
+    changes(after, { handArmor: 'Armor_Adult_Gauntlet_Silver' }), editable));
+  assert.equal(downgraded.p.string(0x7CE1CB81, 64), 'Armor_Adult_Gauntlet_Silver');
+});
+
+test('gauntlets may be equipped with an addition but cannot be unowned or removed', () => {
+  const f = fixture();
+  const gold = item('Armor_Adult_Gauntlet_Gold');
+  assert.throws(() => edit(f, { handArmor: 'Armor_Adult_Gauntlet_Gold' }), /must be owned/);
+  assert.throws(() => edit(f, { handArmor: 'UnknownArmor' }), /must be owned/);
+  const added = edit(f, { additions: [gold], handArmor: 'Armor_Adult_Gauntlet_Gold' });
+  assert.equal(added.p.string(0x7CE1CB81, 64), 'Armor_Adult_Gauntlet_Gold');
+  for (const hash of [gold, ...registration(gold).slice(1, 3)]) assert.equal(added.p.int(hash), 1);
+  const owned = fixture(['Armor_Adult_Gauntlet_Gold']);
+  assert.throws(() => edit(owned, { removals: [gold], handArmor: 'Armor_Adult_Gauntlet_Gold' }), /must be owned/);
+});
+
+test('saves missing the hand equipment field support unchanged edits but reject equipping', () => {
+  const f = fixture(['Armor_Adult_Gauntlet_Gold']);
+  const fieldIndex = catalog.fields.findIndex(([hash]) => hash === 0x7CE1CB81);
+  new DataView(f.p.buffer).setUint32(40 + fieldIndex * 8, 0xDEADBEEF, true);
+  assert.doesNotThrow(() => edit(f, {}));
+  assert.throws(() => edit(f, { handArmor: 'Armor_Adult_Gauntlet_Gold' }), /missing/i);
+});
