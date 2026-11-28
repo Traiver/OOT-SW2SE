@@ -56,20 +56,31 @@ computer.
 
 GitHub Actions publishes an image to the GitHub Container Registry
 ([`.github/workflows/web.yml`](../.github/workflows/web.yml)): `:latest` and
-`:<version>` for releases, `:edge` for the main branch.
+`:<version>` for releases, `:edge` for the main branch. Until the first
+release is published only `:edge` exists, so the commands below use it; use
+`:latest` instead once there is a release.
 
 ```sh
-docker run --rm -p 8080:8080 ghcr.io/traiver/oot-sw2se:latest
+docker run --rm -p 8080:8080 ghcr.io/traiver/oot-sw2se:edge
 ```
 
-Then open <http://localhost:8080>. The image holds only
+With Docker Compose, [`compose.yaml`](compose.yaml) runs the same image
+locked down and restarts it with Docker (`OOT_SW2SE_TAG` picks the tag,
+`edge` by default; `OOT_SW2SE_PORT` the port, 8080 by default):
+
+```sh
+docker compose -f web/compose.yaml up -d
+```
+
+Then open <http://localhost:8080> (with Compose and `OOT_SW2SE_PORT` set,
+the port you chose: `http://localhost:<port>`). The image holds only
 [static-web-server](https://static-web-server.net), its settings
 ([`sws.toml`](sws.toml)) and the page. It runs as an unprivileged user, needs
 no write access and no capabilities, so it also runs locked down:
 
 ```sh
 docker run --rm -p 8080:8080 --read-only --cap-drop ALL --security-opt no-new-privileges \
-  ghcr.io/traiver/oot-sw2se:latest
+  ghcr.io/traiver/oot-sw2se:edge
 ```
 
 `GET /health` answers `200` for health checks. Serve it over HTTPS (behind a

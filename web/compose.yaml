@@ -1,0 +1,18 @@
+# Web version of OOT SW2SE with Docker Compose: `docker compose -f web/compose.yaml up -d`, then open
+# http://localhost:8080. On a NAS or another machine, put it behind an HTTPS reverse proxy: browsers only allow the
+# folder pickers on secure pages (https:// or localhost).
+#
+# OOT_SW2SE_TAG picks the image: `edge` (the main branch, the default until the first release), `latest` (the newest
+# release) or a version.
+services:
+  oot-sw2se:
+    image: ghcr.io/traiver/oot-sw2se:${OOT_SW2SE_TAG:-edge}
+    ports:
+      - "${OOT_SW2SE_PORT:-8080}:8080"
+    # The server only reads the page: no write access, no capabilities.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
