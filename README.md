@@ -25,7 +25,7 @@ The checklist shows the save as it would be after exporting the pending edits: a
 
 Each objective counts equally; a count counts by its share, so 37 of 100 Gold Skulltula Tokens count as 0.37 of one objective. The percentages cover these objectives only; they are not the game's own completion rate. An objective whose field is missing from a save is shown as such and left out of the totals. It only reads the save; nothing in the checklist changes it.
 
-Items come from their inventory stock, as in Inventory. Songs come from the `IsGet.Item_Melody_<song>` flags. Four of them (Epona's Song, Sun's Song, Song of Time, Prelude of Light) are not named in the catalog; their hashes were found by hashing the field names: a field's hash is the MurmurHash3 (x86, 32-bit, seed 0) of its name, for example `PlayerStatus.CurrentRupee` → `0xA77921D7`. `tests/editor.test.cjs` checks the song hashes this way.
+Items come from their inventory stock, as in Inventory. Songs come from the `IsGet.Item_Melody_<song>` flags. A field's hash is the MurmurHash3 (x86, 32-bit, seed 0) of its full name, for example `PlayerStatus.CurrentRupee` → `0xA77921D7`; `tests/editor.test.cjs` checks every name in the catalog and the song hashes this way.
 
 ## Linux version
 
